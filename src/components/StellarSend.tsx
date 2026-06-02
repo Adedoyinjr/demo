@@ -12,6 +12,7 @@ import {
 import {
   generateStealthAddress,
   decodeStealthMetaAddress,
+  resolveName,
   SCHEME_ID,
 } from '@wraith-protocol/sdk/chains/stellar';
 import { useStellarWallet } from '@/context/StellarWalletContext';
@@ -82,6 +83,53 @@ export function StellarSend() {
   } | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
+  const [resolvedMetaAddress, setResolvedMetaAddress] = useState<string | null>(null);
+  const [isResolvingName, setIsResolvingName] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const resolveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const isMetaAddress = recipient.startsWith('st:xlm:');
+  const cleanedName = recipient.replace(/\.wraith$/i, '').toLowerCase();
+  const isWraithName = !isMetaAddress && cleanedName.length >= 3 && cleanedName.length <= 32 && /^[a-z0-9]+$/.test(cleanedName);
+
+  useEffect(() => {
+    if (resolveTimeoutRef.current) {
+      clearTimeout(resolveTimeoutRef.current);
+    }
+
+    if (!isWraithName) {
+      setResolvedMetaAddress(null);
+      setResolveError(null);
+      return;
+    }
+
+    setIsResolvingName(true);
+    setResolveError(null);
+
+    resolveTimeoutRef.current = setTimeout(async () => {
+      try {
+        const metaAddress = await resolveName(cleanedName);
+        if (metaAddress === null) {
+          setResolveError('Name not registered on Stellar testnet');
+          setResolvedMetaAddress(null);
+        } else {
+          setResolvedMetaAddress(metaAddress);
+          setResolveError(null);
+        }
+      } catch (err) {
+        setResolveError('Failed to resolve name');
+        setResolvedMetaAddress(null);
+      } finally {
+        setIsResolvingName(false);
+      }
+    }, 300);
+
+    return () => {
+      if (resolveTimeoutRef.current) {
+        clearTimeout(resolveTimeoutRef.current);
+      }
+    };
+  }, [isWraithName, cleanedName]);
 
   const metaAddress = recipient.trim();
   const amountValue = amount.trim();
