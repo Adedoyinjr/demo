@@ -36,6 +36,116 @@ import { KeyVault } from '@/vault';
 const ANNOUNCER_CONTRACT = 'CCJLJ2QRBJAAKIG6ELNQVXLLWMKKWVN5O2FKWUETHZGMPAD4MHK7WVWL';
 const REGISTRY_CONTRACT = 'CC2LAUCXYOPJ4DV4CYXNXYAXRDVOTMAWFF76W4WFD5OVQBD6TN4PYYJ5';
 
+async function fetchAnnouncementEvents(
+  rpcUrl: string,
+  contractId: string,
+): Promise<Announcement[]> {
+  const all: Announcement[] = [];
+
+  try {
+    let startLedger = 1;
+    const probeRes = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 0,
+        method: 'getEvents',
+        params: {
+          startLedger: 1,
+          filters: [{ type: 'contract', contractIds: [contractId] }],
+          pagination: { limit: 1 },
+        },
+      }),
+    });
+    const probeData = await probeRes.json();
+
+    if (probeData.error?.message) {
+      const match = probeData.error.message.match(/range:\s*(\d+)\s*-\s*(\d+)/);
+      if (match) {
+        const oldest = parseInt(match[1], 10);
+        const latest = parseInt(match[2], 10);
+        startLedger = Math.max(oldest, latest - 5000);
+      } else {
+        return all;
+      }
+    }
+
+    let cursor: string | undefined;
+    let hasMore = true;
+
+    while (hasMore) {
+      const params: Record<string, unknown> = {
+        filters: [{ type: 'contract', contractIds: [contractId] }],
+        pagination: { limit: 1000 },
+      };
+
+      if (cursor) {
+        (params.pagination as Record<string, unknown>).cursor = cursor;
+      } else {
+        params.startLedger = startLedger;
+      }
+
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'getEvents', params }),
+      });
+
+      const data = await res.json();
+      const events = data.result?.events ?? [];
+
+      for (const event of events) {
+        try {
+          const ann = parseAnnouncementEvent(event);
+          if (ann) all.push(ann);
+        } catch (err) {
+          console.error('Failed to parse announcement event:', err);
+        }
+      }
+
+      if (events.length < 1000) {
+        hasMore = false;
+      } else {
+        cursor = data.result?.cursor;
+        if (!cursor) hasMore = false;
+      }
+    }
+  } catch {
+    // Events API may not be available
+  }
+
+  return all;
+}
+
+function parseAnnouncementEvent(event: Record<string, unknown>): Announcement | null {
+  const topics = event.topic as string[];
+  if (!topics || topics.length < 3) return null;
+
+  const schemeIdScVal = xdr.ScVal.fromXDR(topics[1], 'base64');
+  const schemeId = schemeIdScVal.u32();
+
+  const stealthScVal = xdr.ScVal.fromXDR(topics[2], 'base64');
+  const stealthScAddress = stealthScVal.address();
+  const stealthAddress = Address.fromScAddress(stealthScAddress).toString();
+
+  const valueScVal = xdr.ScVal.fromXDR(event.value as string, 'base64');
+  const valueVec = valueScVal.vec();
+  if (!valueVec || valueVec.length < 3) return null;
+
+  const callerScAddress = valueVec[0].address();
+  const caller = Address.fromScAddress(callerScAddress).toString();
+
+  const ephBytes = valueVec[1].bytes();
+  const ephemeralPubKey = bytesToHex(new Uint8Array(ephBytes));
+
+  const metaBytes = valueVec[2].bytes();
+  const metadata = bytesToHex(new Uint8Array(metaBytes));
+
+  return { schemeId, stealthAddress, caller, ephemeralPubKey, metadata };
+}
+
+function StellarStealthRow({
 function StellarMatchCardContainer({
   match,
   onWithdrawn,
@@ -214,6 +324,74 @@ function StellarMatchCardContainer({
     setWithdrawing(true);
     setShowSponsorPrompt(false);
 
+      {!withdrawHash && balance && parseFloat(balance) > 0 && (
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="withdraw-dest"
+            className="font-mono text-[10px] uppercase tracking-widest text-outline"
+          >
+            Withdraw to
+          </label>
+          <div className="flex gap-2">
+            <input
+              id="withdraw-dest"
+              type="text"
+              value={dest}
+              onChange={(e) => setDest(e.target.value)}
+              placeholder="Destination address (G...)"
+              className="h-10 flex-1 border border-outline-variant bg-surface px-3 font-mono text-xs text-primary placeholder:text-outline focus:border-primary"
+            />
+            <button
+              onClick={handleWithdraw}
+              disabled={!dest || withdrawing}
+              className="h-10 bg-primary px-4 font-heading text-[10px] font-semibold uppercase tracking-widest text-surface transition-colors hover:brightness-110 disabled:opacity-30"
+            >
+              {withdrawing ? '...' : 'Withdraw'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="text-xs text-error">{error}</p>}
+
+      {withdrawHash && (
+        <div className="flex items-center gap-2">
+          <span className="inline-block h-1.5 w-1.5 bg-tertiary"></span>
+          <span className="font-mono text-[10px] text-on-surface-variant">
+            Withdrawn —{' '}
+            <a
+              href={stellarTxUrl(withdrawHash)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline"
+            >
+              {withdrawHash.slice(0, 14)}...
+            </a>
+          </span>
+        </div>
+      )}
+
+      <div className="border-t border-outline-variant/30 pt-3">
+        {!showKey ? (
+          <button
+            onClick={() => setShowKey(true)}
+            className="font-mono text-[10px] uppercase tracking-widest text-outline transition-colors hover:text-primary"
+          >
+            Reveal secret key
+          </button>
+        ) : (
+          <div className="border border-error/20 bg-error/5 p-3">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="font-mono text-[9px] font-semibold uppercase tracking-widest text-error">
+                Stealth Key
+              </span>
+              <CopyButton text={scalarHex} />
+            </div>
+            <code className="break-all font-mono text-[11px] text-on-surface">{scalarHex}</code>
+          </div>
+        )}
+      </div>
+    </div>
     const onRetry = (attempt: number) => setRetryStatus(`Retrying (${attempt}/3)…`);
 
     try {
@@ -437,7 +615,8 @@ export function StellarReceive() {
     (async () => {
       try {
         const { rpc: rpcMod } = await import('@stellar/stellar-sdk');
-        const soroban = new rpcMod.Server(STELLAR_NETWORK.rpcUrl);
+        const soroban =
+          (window as any).sorobanServerMock || new rpcMod.Server(STELLAR_NETWORK.rpcUrl);
         const networkPassphrase = STELLAR_NETWORK.networkPassphrase;
 
         const onRetry = (attempt: number) => setRetryStatus(`Retrying (${attempt}/3)…`);
@@ -684,7 +863,8 @@ export function StellarReceive() {
     const onRetryReg = (attempt: number) => setRetryStatus(`Retrying (${attempt}/3)…`);
     try {
       const { rpc: rpcMod } = await import('@stellar/stellar-sdk');
-      const soroban = new rpcMod.Server(STELLAR_NETWORK.rpcUrl);
+      const soroban =
+        (window as any).sorobanServerMock || new rpcMod.Server(STELLAR_NETWORK.rpcUrl);
       const networkPassphrase = STELLAR_NETWORK.networkPassphrase;
 
       const accountResponse = await withRetry(() => soroban.getAccount(address), { onRetry: onRetryReg });
@@ -782,6 +962,16 @@ export function StellarReceive() {
     setError('');
 
     try {
+      const announcements = await fetchAnnouncementEvents(
+        STELLAR_NETWORK.rpcUrl,
+        ANNOUNCER_CONTRACT,
+      );
+      const scanFn = (window as any).scanAnnouncementsMock || scanAnnouncements;
+      const results = scanFn(
+        announcements,
+        stellarKeys.viewingKey,
+        stellarKeys.spendingPubKey,
+        stellarKeys.spendingScalar,
       if (workerRef.current) {
         workerRef.current.terminate();
       }

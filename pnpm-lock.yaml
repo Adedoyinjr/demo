@@ -86,14 +86,16 @@ importers:
     devDependencies:
       '@commitlint/cli':
         specifier: ^19.0.0
-        version: 19.8.1(@types/node@25.9.4)(typescript@5.9.3)
+        version: 19.8.1(@types/node@26.0.0)(typescript@5.9.3)
       '@commitlint/config-conventional':
         specifier: ^19.0.0
         version: 19.8.1
       '@playwright/test':
         specifier: ^1.61.0
-        specifier: ^1.60.0
-        version: 1.61.1
+        version: 1.61.0
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.0.0
       '@storybook/addon-a11y':
         specifier: ^8
         version: 8.6.18(storybook@8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6))
@@ -1094,6 +1096,10 @@ packages:
     resolution: {integrity: sha512-IHnV6A+zxU7XwmKFinmYjUcwlyK9+xkG3/s9KcQhI9BjQKycrJ1JRO+FbNYPwZiPKW3je/DR0k7w8/gLa5eaxQ==}
     deprecated: 'Switch to "qr" (new package name) for security updates: npm install qr'
 
+  '@playwright/test@1.61.0':
+    resolution: {integrity: sha512-cKA5B6lpFEMyMGjxF54QihfYpB4FkEGH+qZhtArDEG+wezQAJY8Pq6C7T1SjWz+FFzt3TbyoXBQYk/0292TdJA==}
+    engines: {node: '>=18'}
+    hasBin: true
   '@pkgjs/parseargs@0.11.0':
     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
     engines: {node: '>=14'}
@@ -2046,6 +2052,11 @@ packages:
     peerDependencies:
       storybook: ^8.6.14
 
+  '@types/node@26.0.0':
+    resolution: {integrity: sha512-vf2YFi1iY9lHGwNJMs01biZFbKJkrZR1T6/MlzjhJLPdntOHLhTrDSnSVcdtvjihi4VQNlrFRIxLsDBlQpAipA==}
+
+  '@types/react-dom@19.2.3':
+    resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
   '@storybook/csf-plugin@8.6.18':
     resolution: {integrity: sha512-x1ioz/L0CwaelCkHci3P31YtvwayN3FBftvwQOPbvRh9qeb4Cpz5IdVDmyvSxxYwXN66uAORNoqgjTi7B4/y5Q==}
     peerDependencies:
@@ -4918,7 +4929,8 @@ packages:
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
 
-  onetime@5.1.2:
+  onetime@5.1.2:105
+
     resolution: {integrity: sha512-kbpaSSGJTWdAY5KPVeMOKXSrPtr8C8C7wodJbcsd51jRnmD+GZu8Y0VoU6Dm5Z4vWr0Ig/1NKuWRKf7j5aaYSg==}
     engines: {node: '>=6'}
 
@@ -5118,6 +5130,16 @@ packages:
   pirates@4.0.7:
     resolution: {integrity: sha512-TfySrs/5nm8fQJDcBDuUng3VOUKsd7S+zqvbOTiGXHfxX4wK31ard+hoNuvkicM/2YFzlpDgABOevKSsB4G/FA==}
     engines: {node: '>= 6'}
+
+  playwright-core@1.61.0:
+    resolution: {integrity: sha512-caX7TrY3Ml6egyDX0WUcTHDxodl/b51y5wJOdCEA36QviK/s2g081hvmGs8eaE3DWb6NYZQ6BjO/QkNRPenoPA==}
+    engines: {node: '>=18'}
+    hasBin: true
+
+  playwright@1.61.0:
+    resolution: {integrity: sha512-Z+7BeeqQPRRzklHsVFP4KTGIyMxKUmfeRA4WisM6G3/XW6nwGeX6fX9qYaDa+CiUqpOkb2f6X3nar05R3kSuJQ==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   pixelmatch@5.3.0:
     resolution: {integrity: sha512-o8mkY4E/+LNUf6LzX96ht6k6CEDi65k9G2rjMtBe9Oo+VPKSvl+0GKHuH/AlG+GA5LPG/i5hrekkxUc3s2HU+Q==}
@@ -6076,6 +6098,9 @@ packages:
 
   undici-types@7.25.0:
     resolution: {integrity: sha512-AXNgS1Byr27fTI+2bsPEkV9CxkT8H6xNyRI68b3TatlZo3RkzlqQBLL+w7SmGPVpokjHbcuNVQUWE7FRTg+LRA==}
+
+  undici-types@8.3.0:
+    resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
 
   unicorn-magic@0.1.0:
     resolution: {integrity: sha512-lRfVq8fE8gz6QMBuDM6a+LO3IAzTi05H6gCVaUpir2E1Rwpo4ZUog45KpNXKC/Mn3Yb9UDuHumeFTo9iV/D9FQ==}
@@ -7061,11 +7086,11 @@ snapshots:
       - utf-8-validate
       - zod
 
-  '@commitlint/cli@19.8.1(@types/node@25.9.4)(typescript@5.9.3)':
+  '@commitlint/cli@19.8.1(@types/node@26.0.0)(typescript@5.9.3)':
     dependencies:
       '@commitlint/format': 19.8.1
       '@commitlint/lint': 19.8.1
-      '@commitlint/load': 19.8.1(@types/node@25.9.4)(typescript@5.9.3)
+      '@commitlint/load': 19.8.1(@types/node@26.0.0)(typescript@5.9.3)
       '@commitlint/read': 19.8.1
       '@commitlint/types': 19.8.1
       tinyexec: 1.1.1
@@ -7112,7 +7137,7 @@ snapshots:
       '@commitlint/rules': 19.8.1
       '@commitlint/types': 19.8.1
 
-  '@commitlint/load@19.8.1(@types/node@25.9.4)(typescript@5.9.3)':
+  '@commitlint/load@19.8.1(@types/node@26.0.0)(typescript@5.9.3)':
     dependencies:
       '@commitlint/config-validator': 19.8.1
       '@commitlint/execute-rule': 19.8.1
@@ -7120,7 +7145,7 @@ snapshots:
       '@commitlint/types': 19.8.1
       chalk: 5.6.2
       cosmiconfig: 9.0.1(typescript@5.9.3)
-      cosmiconfig-typescript-loader: 6.3.0(@types/node@25.9.4)(cosmiconfig@9.0.1(typescript@5.9.3))(typescript@5.9.3)
+      cosmiconfig-typescript-loader: 6.3.0(@types/node@26.0.0)(cosmiconfig@9.0.1(typescript@5.9.3))(typescript@5.9.3)
       lodash.isplainobject: 4.0.6
       lodash.merge: 4.6.2
       lodash.uniq: 4.5.0
@@ -7885,6 +7910,9 @@ snapshots:
 
   '@paulmillr/qr@0.2.1': {}
 
+  '@playwright/test@1.61.0':
+    dependencies:
+      playwright: 1.61.0
   '@pkgjs/parseargs@0.11.0':
     optional: true
 
@@ -9172,11 +9200,13 @@ snapshots:
 
   '@storybook/addon-highlight@8.6.18(storybook@8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6))':
     dependencies:
+      '@types/node': 26.0.0
       '@storybook/global': 5.0.0
       storybook: 8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6)
 
   '@storybook/addon-interactions@8.6.14(storybook@8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6))':
     dependencies:
+      '@types/node': 26.0.0
       '@storybook/global': 5.0.0
       '@storybook/instrumenter': 8.6.14(storybook@8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6))
       '@storybook/test': 8.6.14(storybook@8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6))
@@ -9256,6 +9286,11 @@ snapshots:
       storybook: 8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6)
       unplugin: 1.16.1
 
+  '@types/node@26.0.0':
+    dependencies:
+      undici-types: 8.3.0
+
+  '@types/react-dom@19.2.3(@types/react@19.2.14)':
   '@storybook/csf-plugin@8.6.18(storybook@8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6))':
     dependencies:
       storybook: 8.6.18(bufferutil@4.1.0)(prettier@3.8.2)(utf-8-validate@6.0.6)
@@ -9627,11 +9662,11 @@ snapshots:
 
   '@types/ws@7.4.7':
     dependencies:
-      '@types/node': 25.9.4
+      '@types/node': 26.0.0
 
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 25.9.4
+      '@types/node': 26.0.0
 
   '@types/yargs-parser@21.0.3': {}
 
@@ -9666,7 +9701,7 @@ snapshots:
     dependencies:
       '@vanilla-extract/css': 1.17.3
 
-  '@vitejs/plugin-react@4.7.0(vite@6.4.2(@types/node@25.9.4)(jiti@1.21.7)(terser@5.46.1)(yaml@2.8.3))':
+  '@vitejs/plugin-react@4.7.0(vite@6.4.2(@types/node@26.0.0)(jiti@1.21.7)(terser@5.46.1)(yaml@2.8.3))':
     dependencies:
       '@babel/core': 7.29.0
       '@babel/plugin-transform-react-jsx-self': 7.27.1(@babel/core@7.29.0)
@@ -9674,7 +9709,7 @@ snapshots:
       '@rolldown/pluginutils': 1.0.0-beta.27
       '@types/babel__core': 7.20.5
       react-refresh: 0.17.0
-      vite: 6.4.2(@types/node@25.9.4)(jiti@1.21.7)(terser@5.46.1)(yaml@2.8.3)
+      vite: 6.4.2(@types/node@26.0.0)(jiti@1.21.7)(terser@5.46.1)(yaml@2.8.3)
     transitivePeerDependencies:
       - supports-color
 
@@ -11106,11 +11141,12 @@ snapshots:
 
   core-util-is@1.0.3: {}
 
+  cosmiconfig-typescript-loader@6.3.0(@types/node@26.0.0)(cosmiconfig@9.0.1(typescript@5.9.3))(typescript@5.9.3):
   corser@2.0.1: {}
 
   cosmiconfig-typescript-loader@6.3.0(@types/node@25.9.4)(cosmiconfig@9.0.1(typescript@5.9.3))(typescript@5.9.3):
     dependencies:
-      '@types/node': 25.9.4
+      '@types/node': 26.0.0
       cosmiconfig: 9.0.1(typescript@5.9.3)
       jiti: 2.6.1
       typescript: 5.9.3
@@ -13502,6 +13538,14 @@ snapshots:
 
   pirates@4.0.7: {}
 
+  playwright-core@1.61.0: {}
+
+  playwright@1.61.0:
+    dependencies:
+      playwright-core: 1.61.0
+    optionalDependencies:
+      fsevents: 2.3.2
+
   pixelmatch@5.3.0:
     dependencies:
       pngjs: 6.0.0
@@ -14494,6 +14538,8 @@ snapshots:
 
   undici-types@7.25.0: {}
 
+  undici-types@8.3.0: {}
+
   unicorn-magic@0.1.0: {}
 
   union@0.5.0:
@@ -14669,7 +14715,7 @@ snapshots:
       - utf-8-validate
       - zod
 
-  vite@6.4.2(@types/node@25.9.4)(jiti@1.21.7)(terser@5.46.1)(yaml@2.8.3):
+  vite@6.4.2(@types/node@26.0.0)(jiti@1.21.7)(terser@5.46.1)(yaml@2.8.3):
     dependencies:
       esbuild: 0.25.12
       fdir: 6.5.0(picomatch@4.0.4)
@@ -14678,7 +14724,7 @@ snapshots:
       rollup: 4.60.1
       tinyglobby: 0.2.16
     optionalDependencies:
-      '@types/node': 25.9.4
+      '@types/node': 26.0.0
       fsevents: 2.3.3
       jiti: 1.21.7
       terser: 5.46.1
