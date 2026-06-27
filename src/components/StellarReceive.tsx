@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   TransactionBuilder,
   Operation,
@@ -205,8 +207,19 @@ function StellarMatchCardContainer({
       } finally {
         setBalanceState('loaded');
       }
-    })();
-  }, [match.stealthAddress]);
+      const data = await res.json();
+      const xlm = data.balances?.find((b: { asset_type: string }) => b.asset_type === 'native');
+      return xlm?.balance ?? '0';
+    },
+    staleTime: 60000,
+    retry: 3,
+  });
+
+  useEffect(() => {
+    if (!loadingBal && balance) {
+      onBalanceFetched(match.stealthAddress, balance);
+    }
+  }, [balance, loadingBal, match.stealthAddress, onBalanceFetched]);
 
   const handleWithdraw = async () => {
     if (!dest) return;
@@ -554,6 +567,39 @@ export function StellarReceive() {
   const [isRegSuccess, setIsRegSuccess] = useState(false);
   const [regHash, setRegHash] = useState<string | null>(null);
   const [isAlreadyRegistered, setIsAlreadyRegistered] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [knownBalances, setKnownBalances] = useState<Record<string, string>>({});
+  const [visibleCount, setVisibleCount] = useState(25);
+  const parentRef = useRef<HTMLDivElement>(null);
+
+  const handleBalanceFetched = useCallback((addr: string, bal: string) => {
+    setKnownBalances((prev) => {
+      if (prev[addr] === bal) return prev;
+      return { ...prev, [addr]: bal };
+    });
+  }, []);
+
+  const filteredMatches = useMemo(() => {
+    if (!searchQuery) return matched;
+    const lowerQuery = searchQuery.toLowerCase();
+    return matched.filter((m) => {
+      const addrMatch = m.stealthAddress.toLowerCase().includes(lowerQuery);
+      const bal = knownBalances[m.stealthAddress];
+      const balMatch = bal && bal.includes(lowerQuery);
+      return addrMatch || balMatch;
+    });
+  }, [matched, searchQuery, knownBalances]);
+
+  const visibleMatches = useMemo(() => {
+    return filteredMatches.slice(0, visibleCount);
+  }, [filteredMatches, visibleCount]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: visibleMatches.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 200,
+    overscan: 5,
+  });
 
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTag, setActiveTag] = useState<string | null>(null);
@@ -1149,20 +1195,66 @@ export function StellarReceive() {
         matches={
           filteredMatched.length > 0 ? (
             <div className="flex flex-col gap-4">
-              {filteredMatched.map((m) => (
-                <StellarMatchCardContainer
-                  key={m.stealthAddress}
-                  match={m}
-                  onWithdrawn={() => {}}
-                  labelData={labels[m.stealthAddress] ?? null}
-                  onSaveLabel={(label, tags) => saveLabel(m.stealthAddress, label, tags)}
-                  onHide={() => hideAddress(m.stealthAddress)}
-                  onUnhide={() => unhideAddress(m.stealthAddress)}
-                  onTagClick={(tag) => setActiveTag(activeTag === tag ? null : tag)}
-                  showPrivacyWarning={shouldShowPrivacyWarning}
-                  onDismissPrivacyWarning={dismissPrivacyWarning}
-                />
-              ))}
+              <input
+                type="text"
+                placeholder="Search by address or amount..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-12 w-full border border-outline-variant bg-surface px-4 font-body text-sm text-on-surface placeholder:text-outline focus:border-primary"
+              />
+              
+              {filteredMatches.length === 0 && (
+                <div className="py-4 text-center font-body text-xs text-on-surface-variant">
+                  No matching transfers found for &quot;{searchQuery}&quot;
+                </div>
+              )}
+              
+              <div 
+                ref={parentRef} 
+                className="max-h-[600px] overflow-y-auto overflow-x-hidden flex flex-col"
+              >
+                <div
+                  style={{
+                    height: `${rowVirtualizer.getTotalSize()}px`,
+                    width: '100%',
+                    position: 'relative',
+                  }}
+                >
+                  {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+                    const m = visibleMatches[virtualItem.index];
+                    return (
+                      <div
+                        key={virtualItem.key}
+                        data-index={virtualItem.index}
+                        ref={rowVirtualizer.measureElement}
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          transform: `translateY(${virtualItem.start}px)`,
+                          paddingBottom: '16px', // gap equivalent
+                        }}
+                      >
+                        <StellarStealthRow 
+                          match={m} 
+                          onWithdrawn={() => {}} 
+                          onBalanceFetched={handleBalanceFetched}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              
+              {visibleCount < filteredMatches.length && (
+                <button
+                  onClick={() => setVisibleCount((v) => v + 25)}
+                  className="mt-2 h-10 w-full border border-outline-variant font-heading text-[11px] font-semibold uppercase tracking-widest text-primary transition-colors hover:bg-surface-bright"
+                >
+                  Show 25 more
+                </button>
+              )}
             </div>
           ) : null
         }
