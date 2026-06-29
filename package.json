@@ -44,7 +44,8 @@
     "react-qr-reader": "3.0.0-beta-1",
     "react-router-dom": "^7.6.0",
     "viem": "^2.23.0",
-    "wagmi": "^2.14.0"
+    "wagmi": "^2.14.0",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.0.0",
