@@ -25,6 +25,9 @@ import { useStealthKeys } from '@/context/StealthKeysContext';
 import { trackEvent } from '@/lib/telemetry';
 import { CopyButton } from '@/components/CopyButton';
 import { horizenTxUrl, horizenAddrUrl } from '@/lib/explorer';
+import { PrivacyBadge } from '@/components/PrivacyBadge';
+import { computePrivacyScore } from '@/lib/privacy-score';
+import { useActivity } from '@/context/ActivityContext';
 import { horizenTestnet } from '@/config';
 
 function StealthRow({
@@ -43,19 +46,28 @@ function StealthRow({
   const [error, setError] = useState('');
   const [showKey, setShowKey] = useState(false);
 
+  const { upsert } = useActivity();
+
   useEffect(() => {
     (async () => {
       try {
         const client = createPublicClient({ chain: horizenTestnet, transport: http() });
         const bal = await client.getBalance({ address: match.stealthAddress as `0x${string}` });
-        setBalance((Number(bal) / 1e18).toFixed(6));
+        const balStr = (Number(bal) / 1e18).toFixed(6);
+        setBalance(balStr);
+        upsert({
+          address: match.stealthAddress,
+          chain: 'horizen',
+          balance: balStr,
+          scannedAt: Date.now(),
+        });
       } catch {
         setBalance('0');
       } finally {
         setLoadingBal(false);
       }
     })();
-  }, [match.stealthAddress]);
+  }, [match.stealthAddress, upsert]);
 
   const handleWithdraw = async () => {
     if (!dest) return;
@@ -123,6 +135,13 @@ function StealthRow({
             <span className="font-mono text-xs text-outline">...</span>
           ) : balance && parseFloat(balance) > 0 ? (
             <>
+              <PrivacyBadge
+                score={computePrivacyScore({
+                  reuseCount: 1,
+                  balance: balance ?? '0',
+                  transferTimestamps: [],
+                })}
+              />
               <span className="inline-block h-1.5 w-1.5 bg-tertiary"></span>
               <span className="font-heading text-lg font-bold text-on-surface">{balance} ETH</span>
             </>
