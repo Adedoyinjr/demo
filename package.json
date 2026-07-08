@@ -89,13 +89,5 @@
     "workerDirectory": [
       "public"
     ]
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "bufferutil",
-      "esbuild",
-      "keccak",
-      "utf-8-validate"
-    ]
   }
 }
