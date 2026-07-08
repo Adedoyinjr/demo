@@ -37,9 +37,7 @@ export interface HorizonBalanceEntry {
   balance: string;
 }
 
-export function parseAssetBalances(
-  balances: HorizonBalanceEntry[],
-): Record<string, string> {
+export function parseAssetBalances(balances: HorizonBalanceEntry[]): Record<string, string> {
   const map: Record<string, string> = {};
   for (const b of balances) {
     if (b.asset_type === 'native') {

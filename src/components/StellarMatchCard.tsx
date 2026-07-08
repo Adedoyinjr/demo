@@ -62,7 +62,8 @@ export function StellarMatchCard({
   showPrivacyWarning,
   onDismissPrivacyWarning,
 }: StellarMatchCardProps) {
-  const hasAnyBalance = balanceState === 'loaded' && Object.values(balances).some((b) => parseFloat(b) > 0);
+  const hasAnyBalance =
+    balanceState === 'loaded' && Object.values(balances).some((b) => parseFloat(b) > 0);
   const assetBalances = STELLAR_ASSETS.map((asset) => {
     let balanceKey: string;
     if (asset.isNative) {
@@ -71,7 +72,12 @@ export function StellarMatchCard({
       balanceKey = `${asset.key}:${(asset.toAsset() as any).getIssuer()}`;
     }
     const bal = balances[balanceKey] || '0';
-    return { key: asset.key, label: asset.label, balance: bal, formattedBalance: formatStellarAssetAmount(bal, asset.decimals) };
+    return {
+      key: asset.key,
+      label: asset.label,
+      balance: bal,
+      formattedBalance: formatStellarAssetAmount(bal, asset.decimals),
+    };
   });
   const isHidden = !!labelData?.hiddenAt;
   const currentLabel = labelData?.label ?? '';

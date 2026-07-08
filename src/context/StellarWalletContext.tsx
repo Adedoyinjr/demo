@@ -1,6 +1,3 @@
-import { createContext, useContext } from 'react';
-import { STELLAR_NETWORK } from '@/config';
-import { useStellarWallet as useStellarWalletHook } from '@/hooks/useStellarWallet';
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { STELLAR_NETWORK } from '@/config';
 import { useChain } from '@/context/ChainContext';
@@ -16,9 +13,6 @@ interface StellarWalletContextValue {
   disconnect: () => void;
   signMessage: (message: string) => Promise<Uint8Array>;
   signTransaction: (xdr: string) => Promise<string>;
-  openPicker: () => void;
-  closePicker: () => void;
-  walletId: string | null;
   subscribeToDisconnect: (cb: () => void) => () => void;
 }
 
@@ -32,14 +26,6 @@ async function getFreighter() {
 }
 
 export function StellarWalletProvider({ children }: { children: React.ReactNode }) {
-  const stellarWallet = useStellarWalletHook();
-
-  // Legacy signMessage - only supported by Freighter currently
-  const signMessage = async (message: string): Promise<Uint8Array> => {
-    // For now, signMessage is only implemented for Freighter
-    // Other wallets don't support arbitrary message signing in the same way
-    throw new Error('Message signing is currently only supported by Freighter wallet');
-  };
   const { chain } = useChain();
   const [address, setAddress] = useState<string | null>(null);
   const [isInstalled, setIsInstalled] = useState<boolean | null>(null);
@@ -56,8 +42,7 @@ export function StellarWalletProvider({ children }: { children: React.ReactNode 
 
   const isConnected = !!address;
   const isNetworkMismatch =
-    freighterPassphrase !== null &&
-    freighterPassphrase !== STELLAR_NETWORK.networkPassphrase;
+    freighterPassphrase !== null && freighterPassphrase !== STELLAR_NETWORK.networkPassphrase;
 
   // Isolated per-listener invocation so one throwing callback never blocks the rest
   // or the BroadcastChannel broadcast that follows.
@@ -154,41 +139,51 @@ export function StellarWalletProvider({ children }: { children: React.ReactNode 
 
         const w = new freighter.WatchWalletChanges(3000);
         watcher = w;
-        w.watch(({ address: newAddr, networkPassphrase: newPass, error }) => {
-          if (stopped || error) return;
+        w.watch(
+          ({
+            address: newAddr,
+            networkPassphrase: newPass,
+            error,
+          }: {
+            address?: string;
+            networkPassphrase?: string;
+            error?: unknown;
+          }) => {
+            if (stopped || error) return;
 
-          const prevAddr = addressRef.current;
-          const currentAddr = newAddr || null;
+            const prevAddr = addressRef.current;
+            const currentAddr = newAddr || null;
 
-          if (newPass && newPass !== passPhraseRef.current) {
-            passPhraseRef.current = newPass;
-            setFreighterPassphrase(newPass);
-            fireListeners();
-            channelRef.current?.postMessage({
-              type: 'NETWORK_CHANGED',
-              passphrase: newPass,
-              origin: tabId.current,
-            });
-          }
-
-          // Skip address sync when the user deliberately disconnected — Freighter has no
-          // revoke API, so it always reports the active address even after our UI disconnect.
-          if (currentAddr !== prevAddr && !manuallyDisconnected.current) {
-            addressRef.current = currentAddr;
-            setAddress(currentAddr);
-            if (!currentAddr) {
-              fireListeners();
-              channelRef.current?.postMessage({ type: 'DISCONNECTED', origin: tabId.current });
-            } else if (prevAddr) {
+            if (newPass && newPass !== passPhraseRef.current) {
+              passPhraseRef.current = newPass;
+              setFreighterPassphrase(newPass);
               fireListeners();
               channelRef.current?.postMessage({
-                type: 'CONNECTED',
-                address: currentAddr,
+                type: 'NETWORK_CHANGED',
+                passphrase: newPass,
                 origin: tabId.current,
               });
             }
-          }
-        });
+
+            // Skip address sync when the user deliberately disconnected — Freighter has no
+            // revoke API, so it always reports the active address even after our UI disconnect.
+            if (currentAddr !== prevAddr && !manuallyDisconnected.current) {
+              addressRef.current = currentAddr;
+              setAddress(currentAddr);
+              if (!currentAddr) {
+                fireListeners();
+                channelRef.current?.postMessage({ type: 'DISCONNECTED', origin: tabId.current });
+              } else if (prevAddr) {
+                fireListeners();
+                channelRef.current?.postMessage({
+                  type: 'CONNECTED',
+                  address: currentAddr,
+                  origin: tabId.current,
+                });
+              }
+            }
+          },
+        );
       } catch {
         // Guard against scheduling a retry after cleanup already ran
         if (stopped) return;
@@ -319,25 +314,6 @@ export function StellarWalletProvider({ children }: { children: React.ReactNode 
   return (
     <StellarWalletContext.Provider
       value={{
-        address: stellarWallet.publicKey,
-        isConnected: stellarWallet.status === 'connected',
-        connect: async () => {
-          // If no wallet is selected, open picker
-          if (!stellarWallet.walletId) {
-            stellarWallet.openPicker();
-            return;
-          }
-          // Otherwise reconnect with existing wallet
-          if (stellarWallet.walletId) {
-            await stellarWallet.connect(stellarWallet.walletId);
-          }
-        },
-        disconnect: () => stellarWallet.disconnect(),
-        signMessage,
-        signTransaction: stellarWallet.signTransaction,
-        openPicker: stellarWallet.openPicker,
-        closePicker: stellarWallet.closePicker,
-        walletId: stellarWallet.walletId,
         address,
         isConnected,
         isInstalled,

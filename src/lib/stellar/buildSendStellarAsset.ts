@@ -1,16 +1,9 @@
-import {
-  TransactionBuilder,
-  Account,
-  Operation,
-  Asset,
-  Memo,
-} from '@stellar/stellar-sdk';
+import { TransactionBuilder, Account, Operation, Asset, Memo } from '@stellar/stellar-sdk';
 import {
   generateStealthAddress,
   decodeStealthMetaAddress,
 } from '@wraith-protocol/sdk/chains/stellar';
 import { STELLAR_NETWORK } from '@/config';
-import { fetchWithRetry } from '@/lib/stellar/retry';
 import type { StellarAssetKey } from '@/lib/stellar/assets';
 import { getAssetByKey } from '@/lib/stellar/assets';
 
@@ -33,13 +26,7 @@ export interface BuildSendStellarAssetResult {
 export async function buildSendStellarAsset(
   params: BuildSendStellarAssetParams,
 ): Promise<BuildSendStellarAssetResult> {
-  const {
-    senderAddress,
-    recipientMetaAddress,
-    amount,
-    assetKey,
-    memo,
-  } = params;
+  const { senderAddress, recipientMetaAddress, amount, assetKey, memo } = params;
 
   const assetInfo = getAssetByKey(assetKey);
   const asset = assetInfo.toAsset();
@@ -55,9 +42,7 @@ export async function buildSendStellarAsset(
 
   let stealthExists = false;
   try {
-    const stealthCheckRes = await fetch(
-      `${horizonUrl}/accounts/${result.stealthAddress}`,
-    );
+    const stealthCheckRes = await fetch(`${horizonUrl}/accounts/${result.stealthAddress}`);
     stealthExists = stealthCheckRes.ok;
   } catch {
     // Transient — assume not created yet
@@ -131,9 +116,7 @@ export async function checkAssetTrustline(
 
   const assetInfo = getAssetByKey(assetKey);
   try {
-    const res = await fetch(
-      `${STELLAR_NETWORK.horizonUrl}/accounts/${address}`,
-    );
+    const res = await fetch(`${STELLAR_NETWORK.horizonUrl}/accounts/${address}`);
     if (!res.ok) return true;
     const data = await res.json();
     const balances = data.balances || [];

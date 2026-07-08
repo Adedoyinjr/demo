@@ -129,9 +129,7 @@ test.describe('Stellar USDC Asset Send', () => {
           contentType: 'application/json',
           body: JSON.stringify({
             sequence: '123',
-            balances: [
-              { asset_type: 'native', balance: '1000' },
-            ],
+            balances: [{ asset_type: 'native', balance: '1000' }],
           }),
         });
         return;
@@ -142,9 +140,7 @@ test.describe('Stellar USDC Asset Send', () => {
         contentType: 'application/json',
         body: JSON.stringify({
           sequence: '456',
-          balances: [
-            { asset_type: 'native', balance: '10' },
-          ],
+          balances: [{ asset_type: 'native', balance: '10' }],
         }),
       });
     });

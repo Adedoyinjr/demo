@@ -119,8 +119,8 @@ export function StellarSendView({
           Send
         </h1>
         <p className="font-body text-sm leading-relaxed text-on-surface-variant">
-          Send {assetKey} privately using stealth addresses. The recipient gets funds at a fresh address
-          only they can control.
+          Send {assetKey} privately using stealth addresses. The recipient gets funds at a fresh
+          address only they can control.
         </p>
       </div>
 
