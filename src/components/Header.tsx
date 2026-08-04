@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { ChainSwitcher } from './ChainSwitcher';
 import { WalletConnect } from './WalletConnect';
 import { LocaleSwitcher } from './LocaleSwitcher';
+import { NetworkChip } from './NetworkChip';
 import { useTheme } from '@/context/ThemeContext';
 
 export function Header() {
@@ -83,6 +84,7 @@ export function Header() {
           </button>
           <div className="hidden sm:flex sm:items-center sm:gap-3">
             <ChainSwitcher />
+            <NetworkChip />
             <WalletConnect />
           </div>
           <button
