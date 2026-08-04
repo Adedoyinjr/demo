@@ -6,12 +6,14 @@ import { WalletConnect } from './WalletConnect';
 import { LocaleSwitcher } from './LocaleSwitcher';
 import { NetworkChip } from './NetworkChip';
 import { useTheme } from '@/context/ThemeContext';
+import { useNotificationsStore } from '@/stores/notificationsStore';
 
 export function Header() {
   const location = useLocation();
   const { t } = useTranslation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const { theme, toggleTheme } = useTheme();
+  const unreadCount = useNotificationsStore((state) => state.unreadCount());
 
   const navLinks = [
     { to: '/send', label: t('nav.send') },
@@ -40,13 +42,18 @@ export function Header() {
               <Link
                 key={link.to}
                 to={link.to}
-                className={`px-4 py-2 font-heading text-xs uppercase tracking-widest transition-colors ${
+                className={`relative flex items-center gap-1.5 px-4 py-2 font-heading text-xs uppercase tracking-widest transition-colors ${
                   location.pathname === link.to
                     ? 'border-b-[1.5px] border-tertiary text-on-surface'
                     : 'border-b-[1.5px] border-transparent text-outline hover:text-on-surface-variant'
                 }`}
               >
                 {link.label}
+                {link.to === '/notifications' && unreadCount > 0 && (
+                  <span className="bg-tertiary px-1 py-px font-mono text-[9px] font-normal leading-none text-surface">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
               </Link>
             ))}
           </nav>
@@ -124,13 +131,18 @@ export function Header() {
                 key={link.to}
                 to={link.to}
                 onClick={() => setMobileMenuOpen(false)}
-                className={`px-4 py-2.5 font-heading text-[10px] uppercase tracking-widest transition-colors ${
+                className={`relative flex items-center gap-1.5 px-4 py-2.5 font-heading text-[10px] uppercase tracking-widest transition-colors ${
                   location.pathname === link.to
                     ? 'border-b-[1.5px] border-tertiary text-on-surface'
                     : 'border-b-[1.5px] border-transparent text-outline hover:text-on-surface-variant'
                 }`}
               >
                 {link.label}
+                {link.to === '/notifications' && unreadCount > 0 && (
+                  <span className="bg-tertiary px-1 py-px font-mono text-[9px] font-normal leading-none text-surface">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
               </Link>
             ))}
           </nav>
