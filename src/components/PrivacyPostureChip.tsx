@@ -1,33 +1,39 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router-dom';
 import { CopyButton } from './CopyButton';
 import { CKB_NETWORK, SOLANA_NETWORK, STELLAR_NETWORK, horizenTestnet } from '@/config';
+import { useChain } from '@/context/ChainContext';
 import { getConsent, subscribeToConsent } from '@/lib/telemetry';
 import { getPrivacyPosture, getRpcHost, type RpcRoute } from '@/lib/privacy-posture';
 
 const RPC_ROUTES: RpcRoute[] = [
   {
-    chain: 'Horizen',
+    chain: 'horizen',
+    label: 'Horizen',
     url: horizenTestnet.rpcUrls.default.http[0],
     defaultUrl: 'https://horizen-testnet.rpc.caldera.xyz/http',
   },
   {
-    chain: 'Stellar RPC',
+    chain: 'stellar',
+    label: 'Stellar RPC',
     url: STELLAR_NETWORK.rpcUrl,
     defaultUrl: 'https://soroban-testnet.stellar.org',
   },
   {
-    chain: 'Stellar Horizon',
+    chain: 'stellar',
+    label: 'Stellar Horizon',
     url: STELLAR_NETWORK.horizonUrl,
     defaultUrl: 'https://horizon-testnet.stellar.org',
   },
   {
-    chain: 'Solana',
+    chain: 'solana',
+    label: 'Solana',
     url: SOLANA_NETWORK.rpcUrl,
     defaultUrl: 'https://api.devnet.solana.com',
   },
   {
-    chain: 'CKB',
+    chain: 'ckb',
+    label: 'CKB',
     url: CKB_NETWORK.rpcUrl,
     defaultUrl: 'https://testnet.ckb.dev/rpc',
   },
@@ -36,8 +42,11 @@ const RPC_ROUTES: RpcRoute[] = [
 export function PrivacyPostureChip() {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const detailsId = useId();
+  const { chain } = useChain();
   const consent = useSyncExternalStore(subscribeToConsent, getConsent, () => null);
-  const posture = getPrivacyPosture(consent === 'accepted', RPC_ROUTES);
+  const posture = getPrivacyPosture(consent === 'accepted', RPC_ROUTES, chain);
 
   useEffect(() => {
     if (!open) return;
@@ -47,7 +56,10 @@ export function PrivacyPostureChip() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
     }
 
     document.addEventListener('pointerdown', handlePointerDown);
@@ -62,12 +74,13 @@ export function PrivacyPostureChip() {
   return (
     <div ref={containerRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         aria-expanded={open}
         aria-haspopup="dialog"
-        aria-controls="privacy-posture-details"
+        aria-controls={detailsId}
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex items-center gap-1.5 border border-outline-variant px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-on-surface transition-colors hover:border-outline"
+        className="inline-flex items-center gap-1.5 border border-outline-variant px-2 py-0.5 font-mono text-[9px] tracking-wider text-on-surface transition-colors hover:border-outline"
       >
         <span
           aria-hidden="true"
@@ -80,7 +93,7 @@ export function PrivacyPostureChip() {
 
       {open && (
         <div
-          id="privacy-posture-details"
+          id={detailsId}
           role="dialog"
           aria-label="Privacy infrastructure posture"
           className="absolute right-0 z-50 mt-2 w-80 max-w-[calc(100vw-2rem)] border border-outline-variant bg-surface-container p-4 shadow-lg"
@@ -103,10 +116,10 @@ export function PrivacyPostureChip() {
             {RPC_ROUTES.map((route) => {
               const host = getRpcHost(route.url);
               return (
-                <div key={route.chain} className="flex items-start justify-between gap-3">
+                <div key={route.label ?? route.chain} className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="font-heading text-[10px] uppercase tracking-wider text-on-surface-variant">
-                      {route.chain}
+                      {route.label ?? route.chain}
                     </p>
                     <p className="truncate font-mono text-[11px] text-on-surface" title={host}>
                       {host}
