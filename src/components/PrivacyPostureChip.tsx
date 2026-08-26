@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react';
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router-dom';
 import { CopyButton } from './CopyButton';
 import { CKB_NETWORK, SOLANA_NETWORK, STELLAR_NETWORK, horizenTestnet } from '@/config';
