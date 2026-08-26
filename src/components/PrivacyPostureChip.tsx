@@ -1,4 +1,10 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { Link } from 'react-router-dom';
 import { CopyButton } from './CopyButton';
 import { CKB_NETWORK, SOLANA_NETWORK, STELLAR_NETWORK, horizenTestnet } from '@/config';
@@ -116,7 +122,10 @@ export function PrivacyPostureChip() {
             {RPC_ROUTES.map((route) => {
               const host = getRpcHost(route.url);
               return (
-                <div key={route.label ?? route.chain} className="flex items-start justify-between gap-3">
+                <div
+                  key={route.label ?? route.chain}
+                  className="flex items-start justify-between gap-3"
+                >
                   <div className="min-w-0">
                     <p className="font-heading text-[10px] uppercase tracking-wider text-on-surface-variant">
                       {route.label ?? route.chain}
