@@ -1,5 +1,10 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import { getConsent, setConsent, subscribeToConsent, trackPageView } from '@/lib/telemetry';
+import {
+  getConsent,
+  setConsent,
+  subscribeToConsent,
+  trackPageView,
+} from '@/lib/telemetry';
 
 export default function Privacy() {
   const consent = useSyncExternalStore(subscribeToConsent, getConsent, () => null);
@@ -11,7 +16,9 @@ export default function Privacy() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="font-heading text-2xl font-semibold text-on-surface">Privacy Policy</h1>
+        <h1 className="font-heading text-2xl font-semibold text-on-surface">
+          Privacy Policy
+        </h1>
         <p className="mt-2 text-sm text-on-surface-variant">Last updated: August 2026</p>
       </div>
 
