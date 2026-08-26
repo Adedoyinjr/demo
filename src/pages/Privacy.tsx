@@ -1,10 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import {
-  getConsent,
-  setConsent,
-  subscribeToConsent,
-  trackPageView,
-} from '@/lib/telemetry';
+import { getConsent, setConsent, subscribeToConsent, trackPageView } from '@/lib/telemetry';
 
 export default function Privacy() {
   const consent = useSyncExternalStore(subscribeToConsent, getConsent, () => null);
@@ -16,19 +11,15 @@ export default function Privacy() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="font-heading text-2xl font-semibold text-on-surface">
-          Privacy Policy
-        </h1>
+        <h1 className="font-heading text-2xl font-semibold text-on-surface">Privacy Policy</h1>
         <p className="mt-2 text-sm text-on-surface-variant">Last updated: August 2026</p>
       </div>
 
       <section className="space-y-3">
-        <h2 className="font-heading text-lg font-medium text-on-surface">
-          Infrastructure privacy
-        </h2>
+        <h2 className="font-heading text-lg font-medium text-on-surface">Infrastructure privacy</h2>
         <p className="text-sm leading-relaxed text-on-surface-variant">
-          The privacy posture chip in the header reads RPC hostnames and telemetry consent locally in
-          your browser. It makes no network requests of its own.
+          The privacy posture chip in the header reads RPC hostnames and telemetry consent locally
+          in your browser. It makes no network requests of its own.
         </p>
         <p className="text-sm leading-relaxed text-on-surface-variant">
           RPC URLs and hostnames are never included in analytics events. The chip is separate from
