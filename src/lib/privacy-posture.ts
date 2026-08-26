@@ -29,7 +29,9 @@ export function getPrivacyPosture(
   routes: readonly RpcRoute[],
   activeChain?: string,
 ): PrivacyPosture {
-  const relevantRoutes = activeChain ? routes.filter((route) => route.chain === activeChain) : routes;
+  const relevantRoutes = activeChain
+    ? routes.filter((route) => route.chain === activeChain)
+    : routes;
   const allRoutesAreNonDefault =
     relevantRoutes.length > 0 &&
     relevantRoutes.every(
