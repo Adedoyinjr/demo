@@ -4,19 +4,35 @@ const CONSENT_CHANGE_EVENT = 'wraith-telemetry-consent-change';
 export type ConsentState = 'accepted' | 'declined' | null;
 
 export function getConsent(): ConsentState {
-  const val = localStorage.getItem(STORAGE_KEY);
-  if (val === 'accepted' || val === 'declined') return val;
+  if (typeof localStorage === 'undefined') return null;
+
+  try {
+    const val = localStorage.getItem(STORAGE_KEY);
+    if (val === 'accepted' || val === 'declined') return val;
+  } catch {
+    return null;
+  }
+
   return null;
 }
 
 export function setConsent(state: 'accepted' | 'declined'): void {
-  localStorage.setItem(STORAGE_KEY, state);
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+
+  try {
+    localStorage.setItem(STORAGE_KEY, state);
+  } catch {
+    return;
+  }
+
   window.dispatchEvent(new Event(CONSENT_CHANGE_EVENT));
 }
 
 export function subscribeToConsent(onChange: () => void): () => void {
+  if (typeof window === 'undefined') return () => undefined;
+
   function handleStorage(event: StorageEvent) {
-    if (event.key === STORAGE_KEY) onChange();
+    if (event.key === STORAGE_KEY || event.key === null) onChange();
   }
 
   window.addEventListener(CONSENT_CHANGE_EVENT, onChange);
@@ -34,13 +50,13 @@ export function isTelemetryEnabled(): boolean {
 
 export function trackPageView(path: string): void {
   if (!isTelemetryEnabled()) return;
-  if (typeof window.plausible === 'undefined') return;
+  if (typeof window === 'undefined' || typeof window.plausible === 'undefined') return;
   window.plausible('pageview', { u: window.location.origin + path });
 }
 
 export function trackEvent(name: string): void {
   if (!isTelemetryEnabled()) return;
-  if (typeof window.plausible === 'undefined') return;
+  if (typeof window === 'undefined' || typeof window.plausible === 'undefined') return;
   window.plausible(name);
 }
 
