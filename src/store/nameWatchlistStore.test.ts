@@ -28,12 +28,34 @@ class MemoryStorage implements Storage {
   }
 }
 
+const mockWindow = {
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  localStorage: new MemoryStorage(),
+  sessionStorage: new MemoryStorage(),
+  location: { href: 'http://localhost' },
+  navigator: { userAgent: 'vitest' },
+  document: {
+    createElement: vi.fn(() => ({
+      style: {},
+      setAttribute: vi.fn(),
+      appendChild: vi.fn(),
+    })),
+  },
+};
+
+vi.stubGlobal('window', mockWindow);
+vi.stubGlobal('localStorage', mockWindow.localStorage);
+vi.stubGlobal('sessionStorage', mockWindow.sessionStorage);
+vi.stubGlobal('navigator', mockWindow.navigator);
+vi.stubGlobal('document', mockWindow.document);
+
 describe('name auction watchlist', () => {
   beforeEach(() => {
     vi.resetModules();
     const storage = new MemoryStorage();
     vi.stubGlobal('localStorage', storage);
-    vi.stubGlobal('window', { localStorage: storage });
+    vi.stubGlobal('window', { ...mockWindow, localStorage: storage });
   });
 
   it('restores watched auctions and sealed bid recovery data', async () => {
