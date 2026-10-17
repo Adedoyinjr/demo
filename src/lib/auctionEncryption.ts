@@ -330,7 +330,20 @@ export async function decryptBids(
       'decrypt_failed',
     );
   }
-  return parsed as Record<string, AuctionBid>;
+  const bids = parsed as Record<string, unknown>;
+  const invalidKeys: string[] = [];
+  for (const [name, value] of Object.entries(bids)) {
+    if (!isAuctionBid(value)) {
+      invalidKeys.push(name);
+    }
+  }
+  if (invalidKeys.length > 0) {
+    throw new AuctionEncryptionError(
+      `Decrypted recovery material contains malformed bid(s): ${invalidKeys.join(', ')}.`,
+      'decrypt_failed',
+    );
+  }
+  return bids as Record<string, AuctionBid>;
 }
 
 /** Build a documented, versioned backup payload suitable for export and later recovery. */
