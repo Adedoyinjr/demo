@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { decryptBids } from '@/lib/auctionEncryption';
 
 class MemoryStorage implements Storage {
   private values = new Map<string, string>();
@@ -283,9 +284,10 @@ describe('name auction watchlist (encrypted recovery)', () => {
     expect(parsed.version).toBe(1);
     expect(parsed.vault.version).toBe(1);
 
-    // Fresh session: import the backup and recover.
+    // Fresh session: import the backup and recover into an empty vault.
     const { useNameWatchlistStore: StoreB } = await loadStore();
     const storeB = StoreB.getState();
+    localStorage.clear();
     await storeB.importBackup(backup, passphrase);
     const state = StoreB.getState();
     expect(state.getStatus()).toBe('unlocked');
@@ -367,5 +369,151 @@ describe('name auction watchlist (encrypted recovery)', () => {
     expect(raw).not.toContain('25000000');
 
     store.unwatchAuction('nova');
+  });
+});
+
+describe('import backup safety (no silent vault destruction)', () => {
+  const currentBid = {
+    name: 'alpha',
+    amountStroops: '10000000',
+    depositStroops: '10000000',
+    saltHex: 'cd'.repeat(32),
+    revealed: false,
+  };
+  const importedBid = {
+    name: 'beta',
+    amountStroops: '20000000',
+    depositStroops: '20000000',
+    saltHex: 'ef'.repeat(32),
+    revealed: false,
+  };
+
+  async function exportImportedBackup(): Promise<string> {
+    const { useNameWatchlistStore: StoreC } = await loadStore();
+    const storeC = StoreC.getState();
+    await storeC.setPassphrase(passphrase, iterations);
+    await storeC.saveBid(importedBid);
+    return await storeC.exportBackup();
+  }
+
+  async function establishCurrentVault(): Promise<void> {
+    // Start from a clean slate: the exported backup may have left a vault in
+    // shared localStorage, which setPassphrase would otherwise reject.
+    localStorage.clear();
+    const { useNameWatchlistStore: StoreA } = await loadStore();
+    const storeA = StoreA.getState();
+    await storeA.setPassphrase(passphrase, iterations);
+    await storeA.saveBid(currentBid);
+  }
+
+  it('refuses to replace a non-empty current vault without explicit confirmation', async () => {
+    const backup = await exportImportedBackup();
+    await establishCurrentVault();
+
+    // Fresh session (simulated reload): current vault still holds currentBid.
+    const { useNameWatchlistStore: StoreB } = await loadStore();
+    const storeB = StoreB.getState();
+    storeB.inspectStorage();
+    expect(storeB.getStatus()).toBe('locked');
+
+    await expect(storeB.importBackup(backup, passphrase)).rejects.toThrow(
+      /current vault|replacement/i,
+    );
+
+    // Current vault untouched: currentBid still recoverable after unlock.
+    await storeB.unlock(passphrase);
+    expect(storeB.getBids().alpha?.saltHex).toBe(currentBid.saltHex);
+    expect(storeB.getBids().beta).toBeUndefined();
+  });
+
+  it('replaces the current vault only when replacement is explicitly confirmed', async () => {
+    const backup = await exportImportedBackup();
+    await establishCurrentVault();
+
+    const { useNameWatchlistStore: StoreA } = await loadStore();
+    const storeA = StoreA.getState();
+    storeA.inspectStorage();
+    expect(storeA.getStatus()).toBe('locked');
+
+    await storeA.importBackup(backup, passphrase, { replace: true });
+    const state = StoreA.getState();
+    expect(state.getStatus()).toBe('unlocked');
+    expect(state.getBids().beta?.saltHex).toBe(importedBid.saltHex);
+    expect(state.getBids().alpha).toBeUndefined();
+
+    // The replacement is durable across a simulated reload.
+    const { useNameWatchlistStore: StoreB } = await loadStore();
+    const storeB = StoreB.getState();
+    storeB.inspectStorage();
+    await storeB.unlock(passphrase);
+    expect(storeB.getBids().beta?.amountStroops).toBe('20000000');
+    expect(storeB.getBids().alpha).toBeUndefined();
+  });
+
+  it('preserves the current vault when import uses the wrong passphrase', async () => {
+    const backup = await exportImportedBackup();
+    await establishCurrentVault();
+
+    const { useNameWatchlistStore: StoreA } = await loadStore();
+    const storeA = StoreA.getState();
+    storeA.inspectStorage();
+
+    await expect(
+      storeA.importBackup(backup, 'wrong-passphrase!', { replace: true }),
+    ).rejects.toThrow();
+    // Current vault preserved: unlock with the original passphrase still recovers currentBid.
+    await storeA.unlock(passphrase);
+    expect(storeA.getBids().alpha?.saltHex).toBe(currentBid.saltHex);
+    expect(storeA.getBids().beta).toBeUndefined();
+  });
+
+  it('preserves the current vault when importing a corrupted backup', async () => {
+    const parsed = JSON.parse(await exportImportedBackup());
+    parsed.vault.data = 'AAAA'; // corrupted ciphertext
+    const corrupted = JSON.stringify(parsed);
+    await establishCurrentVault();
+
+    const { useNameWatchlistStore: StoreA } = await loadStore();
+    const storeA = StoreA.getState();
+    storeA.inspectStorage();
+
+    await expect(storeA.importBackup(corrupted, passphrase, { replace: true })).rejects.toThrow();
+    // Current vault preserved.
+    await storeA.unlock(passphrase);
+    expect(storeA.getBids().alpha?.saltHex).toBe(currentBid.saltHex);
+    expect(storeA.getBids().beta).toBeUndefined();
+  });
+});
+
+describe('saveBid read-back verification (submission gate)', () => {
+  const gateBid = {
+    name: 'gate',
+    amountStroops: '7000000',
+    depositStroops: '7000000',
+    saltHex: '01'.repeat(32),
+    revealed: false,
+  };
+
+  it('persists a decryptable, verified recovery record before it can be trusted for submission', async () => {
+    const { useNameWatchlistStore } = await loadStore();
+    const store = useNameWatchlistStore.getState();
+    await store.setPassphrase(passphrase, iterations);
+    await store.saveBid(gateBid);
+
+    // The persisted vault must be decryptable and contain the exact recovery
+    // material (salt + amount) — this is the verification gate that must pass
+    // before an on-chain commit is ever submitted.
+    const raw = localStorage.getItem('wraith-name-auction-watchlist');
+    expect(raw).not.toBeNull();
+    const parsed = JSON.parse(raw!);
+    expect(parsed.encryptedBids).toBeDefined();
+    // Plaintext recovery secrets must never appear in localStorage.
+    expect(raw).not.toContain(gateBid.saltHex);
+    expect(raw).not.toContain(gateBid.amountStroops);
+
+    const decrypted = await decryptBids(passphrase, parsed.encryptedBids);
+    expect(decrypted.gate?.saltHex).toBe(gateBid.saltHex);
+    expect(decrypted.gate?.amountStroops).toBe(gateBid.amountStroops);
+    expect(decrypted.gate?.revealed).toBe(false);
   });
 });

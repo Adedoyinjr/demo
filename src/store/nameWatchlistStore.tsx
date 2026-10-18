@@ -56,7 +56,11 @@ interface NameWatchlistState {
   markBidRevealed: (name: string) => Promise<void>;
   removeBid: (name: string) => Promise<void>;
   exportBackup: () => Promise<string>;
-  importBackup: (backup: string, passphrase: string) => Promise<void>;
+  importBackup: (
+    backup: string,
+    passphrase: string,
+    options?: { replace?: boolean },
+  ) => Promise<void>;
   clearLegacy: () => Promise<boolean>;
   getBids: () => Record<string, AuctionBid>;
   getStatus: () => AuctionStatus;
@@ -229,6 +233,53 @@ async function persistEncrypted(
   writeActive({ watchedAuctions, encryptedBids: vault });
 }
 
+/** Decrypt a stored vault using the in-memory derived key (vault must be unlocked). */
+async function decryptVaultWithActiveKey(
+  vault: EncryptedBidVault,
+): Promise<Record<string, AuctionBid>> {
+  if (!activeKey) {
+    throw new Error('Vault is not unlocked.');
+  }
+  const subtle = globalThis.crypto.subtle;
+  const iv = fromBase64(vault.cipher.iv);
+  const ciphertext = new Uint8Array(fromBase64(vault.data));
+  const decrypted = await subtle.decrypt(
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+    activeKey,
+    ciphertext,
+  );
+  const plaintext = new TextDecoder().decode(decrypted);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plaintext);
+  } catch {
+    throw new Error('Persisted recovery record is not valid JSON.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Persisted recovery record is not a bids record.');
+  }
+  return parsed as Record<string, AuctionBid>;
+}
+
+/** Read back the persisted vault and verify every expected bid is durably stored. */
+async function verifyStoredBids(expected: Record<string, AuctionBid>): Promise<void> {
+  if (!activeKey) {
+    throw new Error('Vault is not unlocked; cannot verify persisted recovery record.');
+  }
+  const active = readActive();
+  const vault = active?.encryptedBids ?? null;
+  if (!vault) {
+    throw new Error('No encrypted vault found after persisting bid.');
+  }
+  const decrypted = await decryptVaultWithActiveKey(vault);
+  for (const [name, bid] of Object.entries(expected)) {
+    const stored = decrypted[name];
+    if (!stored || JSON.stringify(stored) !== JSON.stringify(bid)) {
+      throw new Error(`Persisted recovery record verification failed for ${name}.`);
+    }
+  }
+}
+
 export const useNameWatchlistStore = create<NameWatchlistState>((set, get) => ({
   watchedAuctions: [],
   bids: {},
@@ -366,6 +417,9 @@ export const useNameWatchlistStore = create<NameWatchlistState>((set, get) => ({
       watched.push({ name, endsAt: 0 });
     }
     await persistEncrypted(watched, bids);
+    // Read back and verify the recovery record is durably stored and decryptable
+    // before it is trusted for on-chain submission.
+    await verifyStoredBids(bids);
     set({ bids, watchedAuctions: watched });
   },
 
@@ -400,21 +454,34 @@ export const useNameWatchlistStore = create<NameWatchlistState>((set, get) => ({
     return JSON.stringify(createBackup(vault));
   },
 
-  async importBackup(backup, passphrase) {
+  async importBackup(backup, passphrase, { replace = false } = {}) {
     if (!passphrase || passphrase.length < 8) {
       throw new Error('Passphrase must be at least 8 characters.');
     }
     set({ error: null });
+
+    // Refuse to replace a non-empty current vault without explicit confirmation.
+    // This check runs before any decryption or key derivation so the current
+    // vault and its in-memory key are preserved on refusal.
+    const currentVault = activeEncryptedVault();
+    if (currentVault && !replace) {
+      const message =
+        'Current vault already contains bid recovery secrets. Export your current vault first, or confirm replacement.';
+      set({ status: 'error', error: message });
+      throw new Error(message);
+    }
+
     clearActiveKey();
     try {
       const input: unknown = typeof backup === 'string' ? JSON.parse(backup) : backup;
       const parsed = parseBackup(input);
+      // Decrypt the imported backup to validate the passphrase and ciphertext and
+      // inspect the recovered bids. This does not touch the current vault.
       const decrypted = await decryptBids(passphrase, parsed.vault);
       const salt = fromBase64(parsed.vault.kdf.salt);
       activeKey = await deriveKey(passphrase, salt, parsed.vault.kdf.iterations);
       activeKdfMeta = { salt: parsed.vault.kdf.salt, iterations: parsed.vault.kdf.iterations };
-      // Stage the recovered encrypted vault as the active record. Legacy
-      // plaintext, if any, is left intact until explicitly cleared.
+      // Only now, after successful validation, overwrite the active record.
       writeActive({ watchedAuctions: [], encryptedBids: parsed.vault });
       set({
         bids: decrypted,

@@ -210,6 +210,16 @@ export default function NamesAuctions() {
         parsedBid,
         saltHex,
       );
+      // Persist and verify the recovery record BEFORE signing or broadcasting the
+      // on-chain commit. If storage or verification fails, stop here and show an
+      // error: no transaction is ever submitted without a durable recovery record.
+      await saveBid({
+        name: selectedAuction.name,
+        amountStroops: parsedBid.toString(),
+        depositStroops: parsedBid.toString(),
+        saltHex,
+        revealed: false,
+      });
       const submitted = await submitAuctionTransaction(action, () =>
         buildCommitNameBidTransaction(address, {
           name: selectedAuction.name,
@@ -218,17 +228,12 @@ export default function NamesAuctions() {
         }),
       );
       if (submitted) {
-        await saveBid({
-          name: selectedAuction.name,
-          amountStroops: parsedBid.toString(),
-          depositStroops: parsedBid.toString(),
-          saltHex,
-          revealed: false,
-        });
         watchAuction({ name: selectedAuction.name, endsAt: selectedAuction.revealEnd });
         setSelectedAuction(null);
         setBidAmount('');
       }
+      // If submission fails or its outcome is ambiguous, the persisted recovery
+      // record is retained so the bid can be retried or revealed after a reload.
     } catch (commitmentError) {
       setError(
         commitmentError instanceof Error ? commitmentError.message : 'Failed to prepare bid',
@@ -361,7 +366,20 @@ export default function NamesAuctions() {
     setImporting(true);
     try {
       const text = await file.text();
-      await importBackup(text, passphrase);
+      // Never silently replace a non-empty current vault. Require explicit
+      // confirmation before importing overwrites the current recovery secrets.
+      let replace = false;
+      if (hasEncryptedVault) {
+        const confirmed = window.confirm(
+          'Your current vault already contains bid recovery secrets. Importing this backup will replace it. Export your current vault first, or click OK to confirm replacement.',
+        );
+        if (!confirmed) {
+          setImporting(false);
+          return;
+        }
+        replace = true;
+      }
+      await importBackup(text, passphrase, { replace });
       setPassphraseValue('');
       setImportFile(null);
     } catch (err) {
