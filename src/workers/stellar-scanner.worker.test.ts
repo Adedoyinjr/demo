@@ -341,6 +341,8 @@ describe('stellar-scanner worker message contract', () => {
     expect(requestedStartLedgers).toEqual([250]);
   });
 
+  // The 1,000-event page is CPU-bound and only exceeds the default 5s budget
+  // when the whole suite runs in parallel, so this test gets an explicit timeout.
   it('paginates past the 1,000-event page cap and reports progress for every page', async () => {
     await import('./stellar-scanner.worker');
     const requests: Record<string, any>[] = [];
@@ -391,7 +393,7 @@ describe('stellar-scanner worker message contract', () => {
     expect(terminal.type).toBe('SUCCESS');
     expect(terminal.results).toHaveLength(1);
     expect((terminal.results as any)[0].stealthAddress).toBe(generated.stealthAddress);
-  });
+  }, 30_000);
 
   it('keeps the committed cursor when a later page fails so the rescan resumes there', async () => {
     await import('./stellar-scanner.worker');
