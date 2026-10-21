@@ -19,7 +19,7 @@ import {
 } from '@/lib/auctionEncryption';
 
 const MAX_WATCHED_AUCTIONS = 500;
-const MAX_STORAGE_BYTES = 100_000;
+const MAX_STORAGE_BYTES = 400_000;
 const STORAGE_VERSION = 1;
 
 export interface WatchedNameAuction {

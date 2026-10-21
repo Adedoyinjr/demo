@@ -156,6 +156,34 @@ describe('name auction recovery store', () => {
     expect(useNameWatchlistStore.getState().bids).toEqual({});
   });
 
+  it('reads a valid encrypted vault whose serialized form exceeds the legacy storage limit', async () => {
+    const amountStroops = '1'.repeat(80);
+    const bids: Record<string, AuctionBid> = Object.fromEntries(
+      Array.from({ length: 280 }, (_, index) => {
+        const name = `bid${index}`;
+        return [
+          name,
+          {
+            name,
+            amountStroops,
+            depositStroops: amountStroops,
+            saltHex: (index % 256).toString(16).padStart(2, '0').repeat(32),
+            revealed: false,
+          },
+        ];
+      }),
+    );
+    const vault = await encryptBids('large vault passphrase', bids, MIN_PBKDF2_ITERATIONS);
+    const serialized = JSON.stringify(vault);
+    expect(serialized.length).toBeGreaterThan(100_000);
+    storage.setItem(VAULT_STORAGE_KEY, serialized);
+
+    const { useNameWatchlistStore } = await importStore();
+
+    expect(useNameWatchlistStore.getState().status).toBe('locked');
+    expect(useNameWatchlistStore.getState().hasEncryptedVault).toBe(true);
+  });
+
   it('verifies encrypted recovery storage read-back before resolving a saved bid', async () => {
     const { useNameWatchlistStore } = await importStore();
     await useNameWatchlistStore
