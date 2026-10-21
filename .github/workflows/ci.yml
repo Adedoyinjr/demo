@@ -54,6 +54,16 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - name: Run unit tests
-        run: pnpm test:unit
+        run: pnpm test:unit --reporter=default --reporter=junit --outputFile.junit=reports/unit/junit.xml
         env:
           CI: true
+
+      # Keeps the machine-readable report out of the repository and attaches
+      # it to the run so a failing assertion can be inspected after the fact.
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: reports/unit/
+          if-no-files-found: ignore
