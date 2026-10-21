@@ -173,6 +173,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * Ledger encoded in a Soroban event cursor ("<19-digit TOID>-<event index>"): the TOID's
+ * high 32 bits are the ledger sequence. Undefined for any other cursor shape.
+ */
+function cursorLedger(cursor: string): number | undefined {
+  const match = /^(\d{1,19})-\d+$/.exec(cursor);
+  if (!match) return undefined;
+  const ledger = BigInt(match[1]) >> 32n;
+  return ledger <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(ledger) : undefined;
+}
+
 function validateEvent(raw: unknown): StellarRpcEvent | undefined {
   if (!isRecord(raw)) return undefined;
   if (typeof raw.value !== 'string') return undefined;
@@ -450,7 +461,17 @@ export async function fetchEventPages(
       undefined,
     );
 
-    if (page.cursor === undefined) {
+    // The RPC returns a continuation cursor even on an empty page. At the tip that cursor
+    // means "read through ledger N" and is echoed unchanged until the next ledger closes.
+    // An empty page whose cursor has reached the latest ledger is therefore the end of
+    // the data, not a stalled cursor; every other repeated cursor still throws below.
+    const atTip =
+      page.cursor !== undefined &&
+      page.events.length === 0 &&
+      page.latestLedger !== undefined &&
+      (cursorLedger(page.cursor) ?? -1) >= page.latestLedger;
+
+    if (page.cursor === undefined || atTip) {
       // The window is exhausted: every ledger the RPC was able to serve has
       // been read, so the scan may commit up to the smaller of the two tips.
       committedLedger = Math.min(throughLedger, page.latestLedger ?? throughLedger);
@@ -471,7 +492,7 @@ export async function fetchEventPages(
       committedLedger,
     });
 
-    if (page.cursor === undefined) break;
+    if (page.cursor === undefined || atTip) break;
     if (committedLedger >= throughLedger) break;
     if (page.cursor === cursor) {
       throw new StellarRpcResponseError('getEvents', 'cursor did not advance between pages');
