@@ -30,6 +30,12 @@ export default defineConfig({
         background_color: '#0e0e0e',
         lang: 'en',
         categories: ['finance', 'utilities'],
+        share_target: {
+          action: '/send',
+          method: 'GET',
+          enctype: 'application/x-www-form-urlencoded',
+          params: { text: 'text' },
+        },
         icons: [
           { src: '/icons/icon-72x72.png', sizes: '72x72', type: 'image/png', purpose: 'any' },
           { src: '/icons/icon-96x96.png', sizes: '96x96', type: 'image/png', purpose: 'any' },
@@ -65,14 +71,20 @@ export default defineConfig({
       },
 
       manifestFilename: 'manifest.webmanifest',
-      injectRegister: 'auto',
+      // 'prompt' registers the worker without calling skipWaiting, so a waiting
+      // update is surfaced to the user instead of swapping the app underneath
+      // them. `injectRegister: null` disables the auto-injected register script;
+      // registration happens in src/hooks/useAppUpdate.ts via
+      // `virtual:pwa-register` so the prompt is driven by app state.
+      registerType: 'prompt',
+      injectRegister: null,
 
       // injectManifest config: controls what gets injected into self.__WB_MANIFEST
       injectManifest: {
         // Precache all built assets (JS, CSS, HTML, icons, fonts)
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        // Exclude the stellar-notification-sw (it's now merged into app-sw)
-        globIgnores: ['**/stellar-notification-sw*', '**/app-sw*'],
+        // app-sw.ts is the service worker itself, not a prefetchable asset
+        globIgnores: ['**/app-sw*'],
         // Raise file size limit — Stellar SDK + wagmi chunks exceed 2 MiB
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024, // 4 MiB
       },

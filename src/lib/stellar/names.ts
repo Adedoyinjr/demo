@@ -3,19 +3,29 @@ import {
   Account,
   Contract,
   nativeToScVal,
+  scValToNative,
   Address,
   xdr,
 } from '@stellar/stellar-sdk';
+import { Buffer } from 'buffer';
 import { STELLAR_NETWORK } from '@/config';
+import { getStellarContractId } from './deployments';
 
-// Wraith Names contract ID on Stellar Testnet
-// TODO: Replace with actual contract ID from deployment
-export const NAMES_CONTRACT_ID = 'CD3Z7J2QRBJAAKIG6ELNQVXLLWMKKWVN5O2FKWUETHZGMPAD4MHK7WVWL';
+/**
+ * The Wraith Names contract for the selected network. Resolved per call so an
+ * environment override or a new deployment takes effect without a rebuild, and
+ * so an undisployed names contract fails closed instead of calling an address
+ * that cannot exist on-chain.
+ */
+export function getNamesContractId(): string {
+  return getStellarContractId('names');
+}
 
 export interface NameMetadata {
   avatar_url?: string;
   twitter_handle?: string;
   description?: string;
+  socials?: Record<string, string>;
 }
 
 export interface NameRecord {
@@ -45,6 +55,399 @@ export interface MetadataParams {
   metadata: NameMetadata;
 }
 
+function asString(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  if (typeof value === 'object' && 'toString' in value && typeof value.toString === 'function') {
+    const text = value.toString();
+    return text && text !== '[object Object]' ? text : undefined;
+  }
+  return undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function normalizeMetadataValue(value: unknown): NameMetadata {
+  if (!value || typeof value !== 'object') return {};
+
+  if (value instanceof Map) {
+    const entries = Object.fromEntries(
+      Array.from(value.entries()).map(([key, entryValue]) => [String(key), entryValue]),
+    );
+    return normalizeMetadataValue(entries);
+  }
+
+  const record = value as Record<string, unknown>;
+  const direct = record.metadata ?? record.meta ?? record.attributes ?? record;
+  const values = direct && typeof direct === 'object' ? (direct as Record<string, unknown>) : {};
+
+  const metadata: NameMetadata = {};
+  const fallbackValues = Object.entries(values).reduce<Record<string, unknown>>(
+    (acc, [key, entryValue]) => {
+      if (
+        typeof entryValue === 'object' &&
+        entryValue &&
+        'key' in entryValue &&
+        'value' in entryValue
+      ) {
+        acc[String((entryValue as { key?: unknown }).key)] = (
+          entryValue as { value?: unknown }
+        ).value;
+        return acc;
+      }
+      acc[key] = entryValue;
+      return acc;
+    },
+    {},
+  );
+
+  const avatarUrl = asString(
+    fallbackValues.avatar_url ?? fallbackValues.avatarUrl ?? fallbackValues.avatar,
+  );
+  const twitterHandle = asString(
+    fallbackValues.twitter_handle ?? fallbackValues.twitterHandle ?? fallbackValues.twitter,
+  );
+  const description = asString(
+    fallbackValues.description ?? fallbackValues.bio ?? fallbackValues.summary,
+  );
+  const socials =
+    typeof fallbackValues.socials === 'object' && fallbackValues.socials
+      ? (fallbackValues.socials as Record<string, unknown>)
+      : undefined;
+
+  if (avatarUrl) metadata.avatar_url = avatarUrl;
+  if (twitterHandle) metadata.twitter_handle = twitterHandle;
+  if (description) metadata.description = description;
+  if (socials) {
+    metadata.socials = Object.fromEntries(
+      Object.entries(socials)
+        .filter(([, v]) => typeof v !== 'undefined' && v !== null)
+        .map(([key, v]) => [key, asString(v) ?? String(v)]),
+    );
+  }
+
+  return metadata;
+}
+
+function normalizeNameRecordResult(value: unknown, fallbackName: string): NameRecord | null {
+  if (value === null || value === undefined || value === false) return null;
+
+  const root = (() => {
+    if (typeof value === 'object' && value && 'record' in value)
+      return (value as { record: unknown }).record;
+    if (typeof value === 'object' && value && 'result' in value)
+      return (value as { result: unknown }).result;
+    return value;
+  })();
+
+  if (!root || typeof root !== 'object') {
+    if (typeof root === 'string' || typeof root === 'number' || typeof root === 'bigint') {
+      return null;
+    }
+    return null;
+  }
+
+  const obj = root as Record<string, unknown>;
+  const owner = asString(
+    obj.owner ??
+      obj.owner_address ??
+      obj.ownerAddress ??
+      obj.address ??
+      obj.account ??
+      obj.recipient,
+  );
+  const expiresAt = asNumber(
+    obj.expires_at ?? obj.expiresAt ?? obj.expiration ?? obj.expiry ?? obj.expires,
+  );
+
+  const metadata = normalizeMetadataValue(obj.metadata ?? obj.meta ?? obj.attributes ?? obj);
+  const name = asString(obj.name) || fallbackName;
+
+  if (
+    !owner &&
+    !expiresAt &&
+    !metadata.avatar_url &&
+    !metadata.description &&
+    !metadata.twitter_handle
+  ) {
+    if (Array.isArray(root)) {
+      const first = root[0];
+      if (first && typeof first === 'object') return normalizeNameRecordResult(first, fallbackName);
+    }
+    return null;
+  }
+
+  return {
+    name,
+    owner: owner || '',
+    expires_at: expiresAt ? Math.floor(expiresAt) : 0,
+    metadata,
+  };
+}
+
+function parseSimulationReturnValue(value: unknown, fallbackName: string): NameRecord | null {
+  if (!value || typeof value !== 'object') return null;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const parsed = parseSimulationReturnValue(item, fallbackName);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  if (value instanceof Map) {
+    for (const entry of value.values()) {
+      const parsed = parseSimulationReturnValue(entry, fallbackName);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  return normalizeNameRecordResult(value, fallbackName);
+}
+
+export interface NameAuction {
+  name: string;
+  commitEnd: number;
+  revealEnd: number;
+  highestBidder: string | null;
+  highestAmount: bigint;
+  settled: boolean;
+}
+
+export interface NameAuctionConfig {
+  reservePrice: bigint;
+  minBidIncrement: bigint;
+  commitSecs: number;
+  revealSecs: number;
+}
+
+export interface CommitBidParams {
+  name: string;
+  commitmentHex: string;
+  deposit: bigint;
+}
+
+export interface RevealBidParams {
+  name: string;
+  amount: bigint;
+  saltHex: string;
+}
+
+export const MIN_AUCTION_BID_INCREMENT = 1_000_000n; // 0.1 XLM in stroops
+
+async function getSourceAccount(fromAddress: string) {
+  const accountRes = await fetch(`${STELLAR_NETWORK.horizonUrl}/accounts/${fromAddress}`);
+  if (!accountRes.ok) throw new Error('Failed to load account');
+  const accountData = (await accountRes.json()) as { sequence: string };
+  return new Account(fromAddress, accountData.sequence);
+}
+
+async function simulateRead<T>(operation: xdr.Operation): Promise<T> {
+  const { rpc } = await import('@stellar/stellar-sdk');
+  const server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
+  const tx = new TransactionBuilder(
+    new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWH', '0'),
+    { fee: '100', networkPassphrase: STELLAR_NETWORK.networkPassphrase },
+  )
+    .addOperation(operation)
+    .setTimeout(30)
+    .build();
+  const simulation = await server.simulateTransaction(tx);
+  if ('error' in simulation) throw new Error(simulation.error);
+  if (!simulation.result) throw new Error('Contract returned no result');
+  return scValToNative(simulation.result.retval) as T;
+}
+
+async function buildAuctionTransaction(fromAddress: string, operation: xdr.Operation) {
+  const { rpc } = await import('@stellar/stellar-sdk');
+  const server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
+  const sourceAccount = await getSourceAccount(fromAddress);
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: '100',
+    networkPassphrase: STELLAR_NETWORK.networkPassphrase,
+  })
+    .addOperation(operation)
+    .setTimeout(30)
+    .build();
+  const simulation = await server.simulateTransaction(tx);
+  if ('error' in simulation) throw new Error(simulation.error);
+  return rpc.assembleTransaction(tx, simulation).build().toXDR();
+}
+
+function bytesScVal(hex: string) {
+  const normalized = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (!/^[0-9a-f]{64}$/i.test(normalized)) throw new Error('Expected a 32-byte hex value');
+  return xdr.ScVal.scvBytes(Buffer.from(normalized, 'hex'));
+}
+
+function normalizeAuction(value: Record<string, unknown> | null): NameAuction | null {
+  if (!value) return null;
+  return {
+    name: String(value.name ?? ''),
+    commitEnd: Number(value.commit_end ?? 0),
+    revealEnd: Number(value.reveal_end ?? 0),
+    highestBidder: value.highest_bidder ? String(value.highest_bidder) : null,
+    highestAmount: BigInt(String(value.highest_amount ?? 0)),
+    settled: Boolean(value.settled),
+  };
+}
+
+export async function getNameAuction(name: string): Promise<NameAuction | null> {
+  const contract = new Contract(getNamesContractId());
+  const value = await simulateRead<Record<string, unknown> | null>(
+    contract.call('get_auction', nativeToScVal(name.trim().toLowerCase())),
+  );
+  return normalizeAuction(value);
+}
+
+export async function getNameAuctionConfig(): Promise<NameAuctionConfig | null> {
+  const contract = new Contract(getNamesContractId());
+  const value = await simulateRead<Record<string, unknown> | null>(contract.call('auction_config'));
+  if (!value) return null;
+  return {
+    reservePrice: BigInt(String(value.reserve_price ?? 0)),
+    minBidIncrement: BigInt(
+      String(value.min_increment ?? value.min_bid_increment ?? MIN_AUCTION_BID_INCREMENT),
+    ),
+    commitSecs: Number(value.commit_secs ?? 0),
+    revealSecs: Number(value.reveal_secs ?? 0),
+  };
+}
+
+export async function getActiveNameAuctions(names: string[]): Promise<NameAuction[]> {
+  const contract = new Contract(getNamesContractId());
+  try {
+    const values = await simulateRead<Array<Record<string, unknown>>>(
+      contract.call('get_active_auctions'),
+    );
+    if (Array.isArray(values)) {
+      return values
+        .map((value) => normalizeAuction(value))
+        .filter((auction): auction is NameAuction => auction !== null);
+    }
+  } catch {
+    // Current sealed-bid deployments expose lookup-by-name only. Fall back to
+    // the locally tracked names while remaining compatible with enumerable ABIs.
+  }
+
+  const uniqueNames = [...new Set(names.map((name) => name.trim().toLowerCase()).filter(Boolean))];
+  const auctions = await Promise.all(
+    uniqueNames.map(async (name) => {
+      try {
+        return await getNameAuction(name);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return auctions.filter((auction): auction is NameAuction => auction !== null);
+}
+
+export async function computeNameBidCommitment(
+  bidder: string,
+  name: string,
+  amount: bigint,
+  saltHex: string,
+): Promise<string> {
+  const contract = new Contract(getNamesContractId());
+  const commitment = await simulateRead<Uint8Array>(
+    contract.call(
+      'compute_commitment',
+      nativeToScVal(name.trim().toLowerCase()),
+      new Address(bidder).toScVal(),
+      nativeToScVal(amount, { type: 'i128' }),
+      bytesScVal(saltHex),
+    ),
+  );
+  return Buffer.from(commitment).toString('hex');
+}
+
+export async function buildCommitNameBidTransaction(
+  bidder: string,
+  params: CommitBidParams,
+): Promise<string> {
+  const contract = new Contract(getNamesContractId());
+  return buildAuctionTransaction(
+    bidder,
+    contract.call(
+      'commit_bid',
+      new Address(bidder).toScVal(),
+      nativeToScVal(params.name.trim().toLowerCase()),
+      bytesScVal(params.commitmentHex),
+      nativeToScVal(params.deposit, { type: 'i128' }),
+    ),
+  );
+}
+
+export async function buildRevealNameBidTransaction(
+  bidder: string,
+  params: RevealBidParams,
+): Promise<string> {
+  const contract = new Contract(getNamesContractId());
+  return buildAuctionTransaction(
+    bidder,
+    contract.call(
+      'reveal_bid',
+      new Address(bidder).toScVal(),
+      nativeToScVal(params.name.trim().toLowerCase()),
+      nativeToScVal(params.amount, { type: 'i128' }),
+      bytesScVal(params.saltHex),
+    ),
+  );
+}
+
+export async function buildSettleNameAuctionTransaction(fromAddress: string, name: string) {
+  const contract = new Contract(getNamesContractId());
+  return buildAuctionTransaction(
+    fromAddress,
+    contract.call('settle_auction', nativeToScVal(name.trim().toLowerCase())),
+  );
+}
+
+export async function buildRefundNameBidTransaction(bidder: string, name: string) {
+  const contract = new Contract(getNamesContractId());
+  return buildAuctionTransaction(
+    bidder,
+    contract.call(
+      'withdraw_bid',
+      new Address(bidder).toScVal(),
+      nativeToScVal(name.trim().toLowerCase()),
+    ),
+  );
+}
+
+export async function buildClaimAuctionNameTransaction(
+  winner: string,
+  name: string,
+  stealthMetaAddress: Uint8Array,
+) {
+  if (stealthMetaAddress.length !== 64)
+    throw new Error('A 64-byte stealth meta-address is required');
+  const contract = new Contract(getNamesContractId());
+  return buildAuctionTransaction(
+    winner,
+    contract.call(
+      'claim_name',
+      new Address(winner).toScVal(),
+      nativeToScVal(name.trim().toLowerCase()),
+      xdr.ScVal.scvBytes(Buffer.from(stealthMetaAddress)),
+    ),
+  );
+}
+
 /**
  * Check if a name is available
  */
@@ -52,7 +455,7 @@ export async function checkAvailability(name: string): Promise<boolean> {
   try {
     const { rpc } = await import('@stellar/stellar-sdk');
     const server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
-    const contract = new Contract(NAMES_CONTRACT_ID);
+    const contract = new Contract(getNamesContractId());
 
     const result = await server.simulateTransaction(
       new TransactionBuilder(
@@ -67,15 +470,14 @@ export async function checkAvailability(name: string): Promise<boolean> {
         .build(),
     );
 
-    if ('error' in result) {
-      // If error, name might not exist or other issue - assume unavailable to be safe
-      return false;
-    }
+    if ('error' in result) return false;
+    if (!result.result || !('retval' in result.result)) return true;
 
-    // If result exists, name is registered
-    return false;
-  } catch (error) {
-    // If simulation fails, assume name is available
+    const value = scValToNative(result.result.retval);
+    if (value === null || value === undefined || value === false) return true;
+    const owner = asString(value);
+    return owner !== undefined && owner !== '' && owner !== 'void';
+  } catch {
     return true;
   }
 }
@@ -95,7 +497,7 @@ export async function buildRegisterTransaction(
   const accountData = await accountRes.json();
   const sourceAccount = new Account(fromAddress, accountData.sequence);
 
-  const contract = new Contract(NAMES_CONTRACT_ID);
+  const contract = new Contract(getNamesContractId());
 
   const tx = new TransactionBuilder(sourceAccount, { fee: '100', networkPassphrase })
     .addOperation(
@@ -126,7 +528,7 @@ export async function buildTransferTransaction(
   const accountData = await accountRes.json();
   const sourceAccount = new Account(fromAddress, accountData.sequence);
 
-  const contract = new Contract(NAMES_CONTRACT_ID);
+  const contract = new Contract(getNamesContractId());
 
   const tx = new TransactionBuilder(sourceAccount, { fee: '100', networkPassphrase })
     .addOperation(
@@ -153,7 +555,7 @@ export async function buildRenewTransaction(
   const accountData = await accountRes.json();
   const sourceAccount = new Account(fromAddress, accountData.sequence);
 
-  const contract = new Contract(NAMES_CONTRACT_ID);
+  const contract = new Contract(getNamesContractId());
 
   const tx = new TransactionBuilder(sourceAccount, { fee: '100', networkPassphrase })
     .addOperation(
@@ -184,7 +586,7 @@ export async function buildSetMetadataTransaction(
   const accountData = await accountRes.json();
   const sourceAccount = new Account(fromAddress, accountData.sequence);
 
-  const contract = new Contract(NAMES_CONTRACT_ID);
+  const contract = new Contract(getNamesContractId());
 
   // Build metadata map
   const metadataMap: xdr.ScMapEntry[] = [
@@ -225,7 +627,7 @@ export async function getNameRecord(name: string): Promise<NameRecord | null> {
   try {
     const { rpc } = await import('@stellar/stellar-sdk');
     const server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
-    const contract = new Contract(NAMES_CONTRACT_ID);
+    const contract = new Contract(getNamesContractId());
 
     const result = await server.simulateTransaction(
       new TransactionBuilder(
@@ -240,18 +642,13 @@ export async function getNameRecord(name: string): Promise<NameRecord | null> {
         .build(),
     );
 
-    if ('error' in result) {
+    if ('error' in result || !result.result || !('retval' in result.result)) {
       return null;
     }
 
-    // Parse the result - this depends on actual contract return structure
-    // For now, return a placeholder
-    return {
-      name,
-      owner: '',
-      expires_at: 0,
-      metadata: {},
-    };
+    const nativeValue = scValToNative(result.result.retval);
+    const parsed = parseSimulationReturnValue(nativeValue, name);
+    return parsed;
   } catch {
     return null;
   }
@@ -264,7 +661,7 @@ export async function getOwnedNames(ownerAddress: string): Promise<string[]> {
   try {
     const { rpc } = await import('@stellar/stellar-sdk');
     const server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
-    const contract = new Contract(NAMES_CONTRACT_ID);
+    const contract = new Contract(getNamesContractId());
 
     const result = await server.simulateTransaction(
       new TransactionBuilder(
@@ -279,12 +676,29 @@ export async function getOwnedNames(ownerAddress: string): Promise<string[]> {
         .build(),
     );
 
-    if ('error' in result) {
+    if ('error' in result || !result.result || !('retval' in result.result)) {
       return [];
     }
 
-    // Parse the result - this depends on actual contract return structure
-    // For now, return empty array
+    const value = scValToNative(result.result.retval);
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => asString(entry))
+        .filter((entry): entry is string => Boolean(entry));
+    }
+
+    if (value instanceof Set) {
+      return Array.from(value)
+        .map((entry) => asString(entry))
+        .filter((entry): entry is string => Boolean(entry));
+    }
+
+    if (value instanceof Map) {
+      return Array.from(value.keys())
+        .map((entry) => asString(entry))
+        .filter((entry): entry is string => Boolean(entry));
+    }
+
     return [];
   } catch {
     return [];
