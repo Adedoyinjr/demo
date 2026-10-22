@@ -748,3 +748,19 @@ export async function submitTransaction(signedXdr: string): Promise<string> {
 
   return result.hash;
 }
+
+/**
+ * Query Soroban RPC for an authoritative transaction result. NOT_FOUND is
+ * inconclusive and callers must leave the bid in its unknown state.
+ */
+export async function getNameBidTransactionStatus(
+  transactionHash: string,
+): Promise<'SUCCESS' | 'FAILED' | 'NOT_FOUND'> {
+  const { rpc } = await import('@stellar/stellar-sdk');
+  const server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
+  const result = await server.getTransaction(transactionHash);
+  if (result.status === 'SUCCESS') return 'SUCCESS';
+  if (result.status === 'FAILED') return 'FAILED';
+  return 'NOT_FOUND';
+}
+
