@@ -8,9 +8,9 @@ import { useNameHistory } from '@/store/nameHistoryStore';
 import { useNameWatchlistStore, type AuctionBid } from '@/store/nameWatchlistStore';
 import { stellarTxUrl } from '@/lib/explorer';
 import { submitBidWithRecovery } from '@/lib/stellar/auctionBidSubmission';
+import { tryGetStellarContractId } from '@/lib/stellar/deployments';
 import {
   MIN_AUCTION_BID_INCREMENT,
-  NAMES_CONTRACT_ID,
   buildClaimAuctionNameTransaction,
   buildCommitNameBidTransaction,
   buildRefundNameBidTransaction,
@@ -24,6 +24,8 @@ import {
   type NameAuction,
   type NameAuctionConfig,
 } from '@/lib/stellar/names';
+
+const NAMES_CONTRACT_ID = tryGetStellarContractId('names');
 
 const STROOPS_PER_XLM = 10_000_000n;
 

@@ -108,13 +108,19 @@ function readLegacy(): {
   bids: Record<string, AuctionBid>;
   watchedAuctions: WatchedNameAuction[];
 } | null {
-  const raw = readRaw<{
-    version: number;
-    state: { watchedAuctions?: unknown; bids?: unknown };
-  }>(AUCTION_STORAGE_KEY);
-  if (!raw || raw.version !== 0 || !raw.state) return null;
-  const watchedAuctions = Array.isArray(raw.state.watchedAuctions) ? raw.state.watchedAuctions : [];
-  const bids = raw.state.bids;
+  const raw = readRaw<Record<string, unknown>>(AUCTION_STORAGE_KEY);
+  if (!raw) return null;
+  const legacyState =
+    raw.version === 0 && raw.state && typeof raw.state === 'object'
+      ? (raw.state as Record<string, unknown>)
+      : raw.version === AUCTION_VAULT_VERSION && raw.data && typeof raw.data === 'object'
+        ? (raw.data as Record<string, unknown>)
+        : null;
+  if (!legacyState) return null;
+  const watchedAuctions = Array.isArray(legacyState.watchedAuctions)
+    ? legacyState.watchedAuctions
+    : [];
+  const bids = legacyState.bids;
   if (!bids || typeof bids !== 'object' || Array.isArray(bids)) {
     return { bids: {}, watchedAuctions };
   }
@@ -125,10 +131,11 @@ function readLegacy(): {
 function readCanonicalV1(): ActiveRecord | null {
   const raw = readRaw<{
     version: number;
+    data?: unknown;
     watchedAuctions?: unknown;
     encryptedBids?: unknown;
   }>(AUCTION_STORAGE_KEY);
-  if (!raw || raw.version !== AUCTION_VAULT_VERSION) return null;
+  if (!raw || raw.version !== AUCTION_VAULT_VERSION || raw.data) return null;
   const watchedAuctions = Array.isArray(raw.watchedAuctions) ? raw.watchedAuctions : [];
   const encryptedBids = isValidVault(raw.encryptedBids) ? raw.encryptedBids : null;
   return { watchedAuctions, encryptedBids };
@@ -557,3 +564,31 @@ export const useNameWatchlistStore = create<NameWatchlistState>((set, get) => ({
     return get().status;
   },
 }));
+
+let storageListener: ((event: StorageEvent) => void) | null = null;
+
+export function initNameWatchlistSync() {
+  if (typeof window === 'undefined' || storageListener !== null) return;
+  if (typeof window.addEventListener !== 'function') return;
+
+  storageListener = (event) => {
+    if (event.key === AUCTION_STORAGE_KEY || event.key === VAULT_STORAGE_KEY) {
+      useNameWatchlistStore.getState().inspectStorage();
+    } else if (event.key === null) {
+      clearActiveKey();
+      useNameWatchlistStore.getState().inspectStorage();
+    }
+  };
+
+  window.addEventListener('storage', storageListener);
+}
+
+export function cleanupNameWatchlistSync() {
+  if (storageListener === null) return;
+  if (typeof window.removeEventListener !== 'function') {
+    storageListener = null;
+    return;
+  }
+  window.removeEventListener('storage', storageListener);
+  storageListener = null;
+}

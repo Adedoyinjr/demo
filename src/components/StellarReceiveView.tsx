@@ -6,6 +6,7 @@ import { StellarPaymentLink } from '@/components/StellarPaymentLink';
 import { ImportConflictModal } from '@/components/ImportConflictModal';
 import { EmptyState } from '@/components/EmptyState';
 import type { ImportResult } from '@/lib/stealthLabels';
+import type { RetentionGap } from '@/lib/stellar/scannerCursor';
 
 export interface StellarReceiveViewProps {
   isConnected: boolean;
@@ -18,13 +19,16 @@ export interface StellarReceiveViewProps {
   regHash: string | null;
   isScanning: boolean;
   hasScanned: boolean;
+  scanStrategyLabel?: string;
   matchCount: number;
   matches: ReactNode;
   error: string;
+  retentionGap?: RetentionGap | null;
   retryStatus?: string;
   onDeriveKeys: () => void;
   onRegister: () => void;
   onScan: () => void;
+  onRecoverRetentionGap?: () => void;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
   filteredMatchCount?: number;
@@ -60,13 +64,16 @@ export function StellarReceiveView({
   regHash,
   isScanning,
   hasScanned,
+  scanStrategyLabel,
   matchCount,
   matches,
   error,
+  retentionGap,
   retryStatus = '',
   onDeriveKeys,
   onRegister,
   onScan,
+  onRecoverRetentionGap,
   searchQuery,
   onSearchChange,
   filteredMatchCount,
@@ -290,23 +297,52 @@ export function StellarReceiveView({
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <button
-              data-tour="scan-payments"
-              onClick={onScan}
-              disabled={isScanning}
-              className="h-12 w-full bg-primary px-6 font-heading text-[13px] font-semibold uppercase tracking-widest text-surface transition-colors hover:brightness-110 disabled:opacity-30 sm:w-auto"
-            >
-              {isScanning ? 'Scanning...' : 'Scan for Payments'}
-            </button>
-            {hasScanned && (
-              <span className="font-mono text-xs text-on-surface-variant">
-                {matchCount} transfer{matchCount !== 1 ? 's' : ''} found
+          <div className="flex flex-col gap-2">
+            {scanStrategyLabel && (
+              <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
+                {scanStrategyLabel}
               </span>
             )}
+            <div className="flex items-center justify-between">
+              <button
+                data-tour="scan-payments"
+                onClick={onScan}
+                disabled={isScanning}
+                className="h-12 w-full bg-primary px-6 font-heading text-[13px] font-semibold uppercase tracking-widest text-surface transition-colors hover:brightness-110 disabled:opacity-30 sm:w-auto"
+              >
+                {isScanning ? 'Scanning...' : 'Scan for Payments'}
+              </button>
+              {hasScanned && (
+                <span className="font-mono text-xs text-on-surface-variant">
+                  {matchCount} transfer{matchCount !== 1 ? 's' : ''} found
+                </span>
+              )}
+            </div>
           </div>
 
           {retryStatus && <p className="text-sm text-on-surface-variant">{retryStatus}</p>}
+          {retentionGap && (
+            <div
+              role="alert"
+              className="border border-warning bg-surface-container p-4 text-sm text-on-surface"
+            >
+              <p className="font-heading text-xs font-semibold uppercase tracking-widest text-warning">
+                Scan history expired
+              </p>
+              <p className="mt-2 font-body leading-relaxed text-on-surface-variant">
+                Ledgers {retentionGap.requestedLedger} through{' '}
+                {retentionGap.oldestAvailableLedger - 1} are no longer available from the RPC. Any
+                payments in that range may have been missed.
+              </p>
+              <button
+                type="button"
+                onClick={onRecoverRetentionGap}
+                className="mt-3 h-10 border border-warning px-4 font-heading text-[11px] font-semibold uppercase tracking-widest text-warning transition-colors hover:bg-surface-bright"
+              >
+                Rescan from ledger {retentionGap.oldestAvailableLedger}
+              </button>
+            </div>
+          )}
           {error && <p className="text-sm text-error">{error}</p>}
 
           {/* Search, filter, and toolbar */}

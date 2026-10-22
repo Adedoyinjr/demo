@@ -81,6 +81,33 @@ describe('name auction watchlist (encrypted recovery)', () => {
     expect(state.hasEncryptedVault).toBe(false);
   });
 
+  it('recognizes versioned plaintext watchlist data for safe encrypted migration', async () => {
+    const { useNameWatchlistStore } = await loadStore();
+    localStorage.setItem(
+      'wraith-name-auction-watchlist',
+      JSON.stringify({
+        version: 1,
+        type: 'wraith-versioned-value',
+        data: {
+          watchedAuctions: [{ name: 'nova', endsAt: 1_800_000_000 }],
+          bids: { nova: newBid },
+        },
+      }),
+    );
+
+    useNameWatchlistStore.getState().inspectStorage();
+    expect(useNameWatchlistStore.getState().status).toBe('legacy');
+
+    await useNameWatchlistStore.getState().setPassphrase(passphrase, iterations);
+    expect(useNameWatchlistStore.getState().bids.nova?.saltHex).toBe(newBid.saltHex);
+    expect(localStorage.getItem('wraith-name-auction-watchlist')).toContain(
+      '"type":"wraith-versioned-value"',
+    );
+    expect(localStorage.getItem('wraith-name-auction-watchlist.vault')).not.toContain(
+      newBid.saltHex,
+    );
+  });
+
   it('restores watched auctions without decrypting bids while locked', async () => {
     const { useNameWatchlistStore: StoreA } = await loadStore();
     const storeA = StoreA.getState();

@@ -1,6 +1,7 @@
 // @ts-nocheck  (temporary: wave-6 merges left stale symbol names; unblocks CI)
 import { NetworkMismatchModal } from '@/components/NetworkMismatchModal';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useFocusTrap } from '@/hooks/useFocusTrap';
 import { useSearchParams } from 'react-router-dom';
 import { QrReader } from 'react-qr-reader';
 import {
@@ -23,6 +24,7 @@ import { useStellarWallet } from '@/context/StellarWalletContext';
 import { useContacts } from '@/store/contactsStore';
 import { useNameHistory } from '@/store/nameHistoryStore';
 import { STELLAR_NETWORK } from '@/config';
+import { getStellarContractId } from '@/lib/stellar/deployments';
 import { CopyButton } from '@/components/CopyButton';
 import { AssetPicker } from '@/components/AssetPicker';
 import { trackEvent } from '@/lib/telemetry';
@@ -37,10 +39,18 @@ import {
   simulateStellarSendAnnouncement,
 } from '@/lib/stellarSimulation';
 import { useActivityStore } from '@/stores/activityStore';
+import { useOfflineQueueStore } from '@/stores/offlineQueueStore';
+import {
+  broadcastStellarTransaction,
+  getSubmissionRecord,
+  releaseSubmissionDraft,
+  reserveSubmissionOperationId,
+  submitStellarTransactionOnce,
+  TransactionSubmissionUnknownError,
+} from '@/lib/submissionIdempotency';
 import { ExpiringNamesBanner } from '@/components/ExpiringNamesBanner';
 import { decodeQrImage, isCameraUnavailableError, parseStellarQrPayload } from '@/utils/qr';
 
-const ANNOUNCER_CONTRACT = 'CCJLJ2QRBJAAKIG6ELNQVXLLWMKKWVN5O2FKWUETHZGMPAD4MHK7WVWL';
 const STELLAR_BASE_FEE_XLM = 0.00001;
 const STELLAR_BASE_RESERVE_XLM = 1;
 
@@ -103,18 +113,23 @@ export function StellarSend() {
   const paramAmount = searchParams.get('amount');
   const paramMemo = searchParams.get('memo');
   const paramExp = searchParams.get('exp');
+  const paramAsset = searchParams.get('asset');
+  const paramOperationId = searchParams.get('operationId');
+  const initialAssetKey = STELLAR_ASSETS.find((asset) => asset.key === paramAsset)?.key ?? 'XLM';
 
   const { address, isConnected, signTransaction, isNetworkMismatch } = useStellarWallet();
   const addActivity = useActivityStore((state) => state.addEntry);
   const updateActivity = useActivityStore((state) => state.updateStatus);
   const [recipient, setRecipient] = useState(paramTo || '');
   const [amount, setAmount] = useState(paramAmount || '');
-  const [assetKey, setAssetKey] = useState<StellarAssetKey>('XLM');
+  const [assetKey, setAssetKey] = useState<StellarAssetKey>(initialAssetKey);
   const [allBalances, setAllBalances] = useState<Record<string, string>>({});
   const [memo, setMemo] = useState(paramMemo || '');
   const { isKnownAddress, addContact } = useContacts();
   const { isKnownRecipient, addToHistory } = useNameHistory();
   const [error, setError] = useState('');
+  // Wave 9 (#184): confirmation that the send was queued while offline.
+  const [queuedOffline, setQueuedOffline] = useState(false);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [, setTouched] = useState({ recipient: false, amount: false });
   const [, setSubmitAttempted] = useState(false);
@@ -125,18 +140,39 @@ export function StellarSend() {
   const [isDecodingQrImage, setIsDecodingQrImage] = useState(false);
   const closeScannerRef = useRef<HTMLButtonElement>(null);
   const qrImageInputRef = useRef<HTMLInputElement>(null);
+  // Ref for the "Scan QR" trigger button — focus returns here when scanner closes.
+  const scanQrTriggerRef = useRef<HTMLButtonElement>(null);
+  // Ref for the scanner dialog container — used by the focus trap.
+  const scannerContainerRef = useRef<HTMLDivElement>(null);
 
-  // Focus close button on mount and handle Escape key to close
+  // Focus trap for the QR scanner dialog.
+  useFocusTrap({
+    isActive: isScanningQR,
+    containerRef: scannerContainerRef,
+    initialFocusRef: closeScannerRef,
+    triggerRef: scanQrTriggerRef,
+  });
+
+  // Escape key + Space/U keyboard shortcuts for the QR scanner dialog.
   useEffect(() => {
     if (isScanningQR) {
       setScannerError('');
-      if (closeScannerRef.current) {
-        closeScannerRef.current.focus();
-      }
 
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === 'Escape') {
           setIsScanningQR(false);
+          return;
+        }
+        // Space toggles camera on/off (prevent default page scroll).
+        if (e.key === ' ' || e.code === 'Space') {
+          e.preventDefault();
+          setCameraUnavailable((prev) => !prev);
+          return;
+        }
+        // U triggers the upload-fallback file picker.
+        if (e.key === 'u' || e.key === 'U') {
+          e.preventDefault();
+          qrImageInputRef.current?.click();
         }
       };
       window.addEventListener('keydown', handleKeyDown);
@@ -146,7 +182,7 @@ export function StellarSend() {
     }
   }, [isScanningQR]);
 
-  const applyQrPayload = useCallback((text: string) => {
+  const applyQrPayload = useCallback((text: string, source: 'camera' | 'image' = 'camera') => {
     try {
       const payload = parseStellarQrPayload(text);
       setRecipient(payload.metaAddress);
@@ -155,6 +191,25 @@ export function StellarSend() {
       setTouched((previous) => ({ ...previous, recipient: true }));
       setScannerError('');
       setIsScanningQR(false);
+      // Wave 9 (#184): persist scans captured while offline so the intent
+      // survives reloads; reconciliation revalidates it on reconnect.
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        const queued = useOfflineQueueStore.getState().enqueueScanSession({
+          source,
+          rawText: text,
+          parsed: {
+            metaAddress: payload.metaAddress,
+            ...(payload.amount ? { amount: payload.amount } : {}),
+            ...(payload.memo ? { memo: payload.memo } : {}),
+          },
+          capturedAt: Date.now(),
+        });
+        if (!queued) {
+          setScannerError(
+            'Offline queue is full — reconnect or discard queued items to save new scans.',
+          );
+        }
+      }
     } catch (scanError) {
       setScannerError(
         scanError instanceof Error ? scanError.message : 'This QR code could not be read.',
@@ -191,7 +246,7 @@ export function StellarSend() {
     setIsDecodingQrImage(true);
     setScannerError('');
     try {
-      applyQrPayload(await decodeQrImage(file));
+      applyQrPayload(await decodeQrImage(file), 'image');
     } catch (scanError) {
       setScannerError(
         scanError instanceof Error ? scanError.message : 'This QR image could not be read.',
@@ -220,6 +275,27 @@ export function StellarSend() {
     }
   }, [paramExp]);
 
+  // Wave 9 (#184): a payment link opened while offline is a scan captured
+  // offline — persist it once so the intent survives reloads.
+  const paymentLinkQueuedRef = useRef(false);
+  useEffect(() => {
+    if (paymentLinkQueuedRef.current) return;
+    if (!paramTo) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      paymentLinkQueuedRef.current = true;
+      useOfflineQueueStore.getState().enqueueScanSession({
+        source: 'payment-link',
+        rawText: typeof window !== 'undefined' ? window.location.href : `?to=${paramTo}`,
+        parsed: {
+          metaAddress: paramTo,
+          ...(paramAmount ? { amount: paramAmount } : {}),
+          ...(paramMemo ? { memo: paramMemo } : {}),
+        },
+        capturedAt: Date.now(),
+      });
+    }
+  }, [paramTo, paramAmount, paramMemo]);
+
   const [showUnknownWarning, setShowUnknownWarning] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [contactName, setContactName] = useState('');
@@ -230,6 +306,8 @@ export function StellarSend() {
   } | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
+  const operationIdOverrideRef = useRef<string | null>(paramOperationId);
+  const submissionDraftRef = useRef<{ draft: string; operationId: string } | null>(null);
   const simulationTimeoutRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
 
   const [trustlineMissing, setTrustlineMissing] = useState(false);
@@ -498,6 +576,57 @@ export function StellarSend() {
       return;
     }
 
+    // Wave 9 (#184): offline sends become persisted payment intents instead
+    // of failed network calls. Local format checks still apply; balance and
+    // trustline checks need a connection and run at review time. Signing
+    // stays an explicit user action after reconnect.
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      const offlineRecipientError = validateMetaAddress(recipient.trim());
+      const offlineAmountError = validateAmount(amount.trim(), assetKey);
+      if (offlineRecipientError || offlineAmountError) {
+        setError(offlineRecipientError || offlineAmountError || 'Enter valid send details');
+        return;
+      }
+      const expSecs = paramExp ? parseInt(paramExp, 10) : NaN;
+      const draft = JSON.stringify({
+        chain: 'stellar',
+        wallet: address,
+        recipient: recipient.trim(),
+        amount: amount.trim(),
+        asset: assetKey,
+        memo: memo.trim(),
+      });
+      let operationId: string;
+      try {
+        operationId = await reserveSubmissionOperationId(draft, operationIdOverrideRef.current);
+        submissionDraftRef.current = { draft, operationId };
+      } catch (storageError) {
+        setError(
+          storageError instanceof Error ? storageError.message : 'Could not save operation ID.',
+        );
+        return;
+      }
+      const queued = useOfflineQueueStore.getState().enqueuePaymentIntent({
+        operationId,
+        chain: 'stellar',
+        recipient: recipient.trim(),
+        amount: amount.trim(),
+        asset: assetKey,
+        ...(memo.trim() ? { memo: memo.trim() } : {}),
+        ...(Number.isFinite(expSecs) ? { expiresAt: expSecs * 1000 } : {}),
+        source: paramTo ? 'payment-link' : 'form',
+      });
+      if (!queued) {
+        // Queue full of actionable work: say so instead of dropping the intent.
+        setError('Offline queue is full — reconnect or discard queued items, then try again.');
+        return;
+      }
+      setError('');
+      setQueuedOffline(true);
+      return;
+    }
+    setQueuedOffline(false);
+
     if (!canSubmit) {
       setError(validationError || 'Enter valid send details');
       return;
@@ -507,14 +636,64 @@ export function StellarSend() {
     setIsPending(true);
     setRetryStatus('');
     let txHashHex = '';
+    let signedXdr = '';
+    let operationId = '';
+    const draft = JSON.stringify({
+      chain: 'stellar',
+      wallet: address,
+      recipient: recipient.trim(),
+      amount: amount.trim(),
+      asset: assetKey,
+      memo: memo.trim(),
+    });
 
     const onRetry = (attempt: number) => setRetryStatus(`Retrying (${attempt}/3)…`);
 
     try {
+      operationId = await reserveSubmissionOperationId(draft, operationIdOverrideRef.current);
+      submissionDraftRef.current = { draft, operationId };
       const metaAddress = recipient;
       if (!metaAddress.startsWith('st:xlm:')) {
         setError(t('stellar.validMetaAddressError'));
         setIsPending(false);
+        return;
+      }
+
+      const previousSubmission = getSubmissionRecord(operationId);
+      if (previousSubmission?.txHash && previousSubmission.signedEnvelope) {
+        txHashHex = previousSubmission.txHash;
+        signedXdr = previousSubmission.signedEnvelope;
+        const stealthAddress = previousSubmission.metadata?.stealthAddress;
+        if (typeof stealthAddress === 'string') {
+          setStealthResult({ stealthAddress, ephemeralPubKey: new Uint8Array(), viewTag: 0 });
+        }
+        setTxHash(txHashHex);
+        addActivity({
+          id: txHashHex,
+          chain: 'stellar',
+          wallet: address,
+          kind: 'stealth-send',
+          direction: 'out',
+          status: 'pending',
+          amount: amountValue,
+          recipient: metaAddress,
+          timestamp: Date.now(),
+        });
+        const submittedHash = await submitStellarTransactionOnce(
+          operationId,
+          txHashHex,
+          signedXdr,
+          () => broadcastStellarTransaction(signedXdr, txHashHex, STELLAR_NETWORK.horizonUrl),
+          previousSubmission.metadata,
+        );
+        setTxHash(submittedHash);
+        setIsSuccess(true);
+        updateActivity(txHashHex, 'confirmed');
+        try {
+          await releaseSubmissionDraft(draft, operationId);
+        } catch {
+          setError('Transaction submitted, but its retry state could not be cleared.');
+        }
         return;
       }
 
@@ -583,7 +762,7 @@ export function StellarSend() {
 
       const classicTx = builder.build();
 
-      const signedXdr = await signTransaction(classicTx.toXDR());
+      signedXdr = await signTransaction(classicTx.toXDR());
       txHashHex = classicTx.hash().toString('hex');
       setTxHash(txHashHex);
 
@@ -599,22 +778,21 @@ export function StellarSend() {
         timestamp: Date.now(),
       });
 
-      const submitRes = await fetch(`${horizonUrl}/transactions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `tx=${encodeURIComponent(signedXdr)}`,
-      });
+      const submittedHash = await submitStellarTransactionOnce(
+        operationId,
+        txHashHex,
+        signedXdr,
+        () => broadcastStellarTransaction(signedXdr, txHashHex, horizonUrl),
+        {
+          stealthAddress: result.stealthAddress,
+          ephemeralPubKey: Array.from(result.ephemeralPubKey, (byte) =>
+            byte.toString(16).padStart(2, '0'),
+          ).join(''),
+          viewTag: result.viewTag,
+        },
+      );
 
-      const submitData = await submitRes.json();
-      if (!submitRes.ok) {
-        throw new Error(
-          submitData.extras?.result_codes?.transaction ||
-            submitData.title ||
-            t('common.transactionFailed'),
-        );
-      }
-
-      setTxHash(submitData.hash);
+      setTxHash(submittedHash);
 
       // Add recipient to history after successful send
       addToHistory(recipient);
@@ -624,7 +802,7 @@ export function StellarSend() {
         const { rpc: rpcMod } = await import('@stellar/stellar-sdk');
         const soroban =
           (window as any).sorobanServerMock || new rpcMod.Server(STELLAR_NETWORK.rpcUrl);
-        const announcerContract = new Contract(ANNOUNCER_CONTRACT);
+        const announcerContract = new Contract(getStellarContractId('announcer'));
 
         const freshRes = await fetchWithRetry(`${horizonUrl}/accounts/${address}`, {}, { onRetry });
         setRetryStatus('');
@@ -673,16 +851,46 @@ export function StellarSend() {
 
       setIsSuccess(true);
       updateActivity(txHashHex, 'confirmed');
+      try {
+        await releaseSubmissionDraft(draft, operationId);
+      } catch {
+        setError('Transaction submitted, but its retry state could not be cleared.');
+      }
     } catch (err) {
       setRetryStatus('');
-      if (txHashHex) updateActivity(txHashHex, 'failed');
-      setError(err instanceof Error ? err.message : t('common.transactionFailed'));
+      if (txHashHex && !(err instanceof TransactionSubmissionUnknownError)) {
+        updateActivity(txHashHex, 'failed');
+      }
+      const message = err instanceof Error ? err.message : t('common.transactionFailed');
+      if (operationId && txHashHex && signedXdr) {
+        const queued = useOfflineQueueStore.getState().enqueueSignedSubmit({
+          operationId,
+          chain: 'stellar',
+          txHash: txHashHex,
+          signedXdr,
+        });
+        if (queued) {
+          void useOfflineQueueStore.getState().reconcile();
+        } else {
+          setError(
+            `${message} The retry envelope could not be added because the offline queue is full.`,
+          );
+          return;
+        }
+      }
+      setError(message);
     } finally {
       setIsPending(false);
     }
-  }, [address, recipient, amount, assetKey, signTransaction, t]);
+  }, [address, recipient, amount, assetKey, memo, signTransaction, t, paramExp]);
 
   const reset = () => {
+    const currentSubmission = submissionDraftRef.current;
+    if (currentSubmission) {
+      void releaseSubmissionDraft(currentSubmission.draft, currentSubmission.operationId);
+      submissionDraftRef.current = null;
+    }
+    operationIdOverrideRef.current = null;
     setRecipient(paramTo || '');
     setAmount(paramAmount || '');
     setMemo(paramMemo || '');
@@ -776,6 +984,7 @@ export function StellarSend() {
                   {t('common.paste')}
                 </button>
                 <button
+                  ref={scanQrTriggerRef}
                   type="button"
                   onClick={openQrScanner}
                   className="font-heading text-[10px] uppercase tracking-widest text-primary transition-colors hover:brightness-110"
@@ -830,6 +1039,13 @@ export function StellarSend() {
           </div>
 
           {error && <p className="text-sm text-error">{error}</p>}
+
+          {queuedOffline && !error && (
+            <p role="status" className="text-sm text-on-surface-variant">
+              You&apos;re offline — this send was queued. Review and sign it from the offline queue
+              after you reconnect.
+            </p>
+          )}
 
           {isUnknownRecipient && (
             <div className="flex flex-col gap-3 rounded border border-outline-variant/50 bg-surface-container p-4">
@@ -959,7 +1175,10 @@ export function StellarSend() {
           aria-modal="true"
           aria-labelledby="qr-scanner-title"
         >
-          <div className="flex w-full max-w-sm flex-col gap-4 border border-outline-variant bg-surface-container p-5 shadow-xl">
+          <div
+            ref={scannerContainerRef}
+            className="flex w-full max-w-sm flex-col gap-4 border border-outline-variant bg-surface-container p-5 shadow-xl"
+          >
             <div className="flex items-center justify-between">
               <h2
                 id="qr-scanner-title"
@@ -979,7 +1198,11 @@ export function StellarSend() {
             </div>
 
             {!cameraUnavailable && (
-              <div className="overflow-hidden bg-black">
+              <div
+                className="overflow-hidden bg-black"
+                aria-label="Live camera preview for QR scanning"
+                role="img"
+              >
                 <QrReader
                   constraints={{ facingMode: { ideal: 'environment' } }}
                   scanDelay={300}
@@ -1025,6 +1248,11 @@ export function StellarSend() {
             </button>
             <p className="font-body text-[11px] leading-relaxed text-outline">
               QR images are decoded locally in your browser and are never uploaded.
+            </p>
+            <p className="font-body text-[11px] leading-relaxed text-outline">
+              Keyboard: <kbd className="font-mono">Space</kbd> toggles camera ·{' '}
+              <kbd className="font-mono">U</kbd> opens image picker ·{' '}
+              <kbd className="font-mono">Esc</kbd> closes
             </p>
           </div>
         </div>

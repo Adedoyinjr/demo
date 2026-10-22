@@ -1,17 +1,51 @@
 /// <reference lib="webworker" />
 /// <reference path="../vite-env.d.ts" />
 import { cleanupOutdatedCaches, precacheAndRoute } from 'workbox-precaching';
+import { setCacheNameDetails } from 'workbox-core';
 import { registerRoute } from 'workbox-routing';
 import { NetworkFirst, CacheFirst } from 'workbox-strategies';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { CacheableResponsePlugin } from 'workbox-cacheable-response';
+import { CACHE_PREFIX, CACHE_VERSION_SUFFIX, cacheName, purgeObsoleteCaches } from '../lib/swCache';
+import { fetchEventPages } from '../lib/stellar/rpcEvents';
+import { getStellarContractId, getStellarNetworkConfig } from '../lib/stellar/deployments';
+import { retentionGapFromError, type RetentionGap } from '../lib/stellar/scannerCursor';
+import { decodeAnnouncementEvents } from '../lib/stellar/announcementEvent';
+import { scanPages, deliverMatch, type MatchNotifier } from './backgroundScan';
+import { createIdbScanKeyBackend } from './idbScanKeyBackend';
+import { findSpendingSecretField, removeScanKey } from './scanKeyStore';
+import { scrubLegacySpendingMaterial, upsertAccountRecord } from './accountRecords';
+import {
+  deliverPushNotification,
+  type NotificationPresentation,
+  type ValidatedPushPayload,
+} from './notificationPayload';
+import {
+  claimNotificationId,
+  createNotificationStore,
+  pruneNotificationIds,
+  releaseNotificationId,
+} from './notificationStore';
 
 declare const self: ServiceWorkerGlobalScope;
+
+// ─── Explicit cache versioning ─────────────────────────────────────────────────
+// Every cache this worker owns is named `wraith-<kind>-v<CACHE_VERSION>`. The
+// version lives in the name, so a cache-schema change writes to a fresh cache
+// and deletes the old one during activation instead of mutating entries in
+// place. Bump CACHE_VERSION in src/lib/swCache.ts to migrate.
+setCacheNameDetails({
+  prefix: CACHE_PREFIX,
+  suffix: CACHE_VERSION_SUFFIX,
+  precache: 'precache',
+  runtime: 'runtime',
+});
 
 // ─── Workbox precache ──────────────────────────────────────────────────────────
 // vite-plugin-pwa injects the manifest list here at build time.
 // In dev mode (when devOptions.enabled=true) this is an empty array.
 precacheAndRoute(self.__WB_MANIFEST);
+// Removes precaches carrying build-time revisions of earlier Workbox versions.
 cleanupOutdatedCaches();
 
 // ─── Runtime caching ──────────────────────────────────────────────────────────
@@ -25,7 +59,7 @@ const RPC_HOSTNAMES = [
 registerRoute(
   ({ url }) => RPC_HOSTNAMES.some((h) => url.hostname.includes(h)),
   new NetworkFirst({
-    cacheName: 'rpc-cache',
+    cacheName: cacheName('rpc'),
     networkTimeoutSeconds: 10,
     plugins: [
       new ExpirationPlugin({ maxEntries: 50, maxAgeSeconds: 60 }),
@@ -38,7 +72,7 @@ registerRoute(
 registerRoute(
   /^https:\/\/fonts\.googleapis\.com\/.*/i,
   new CacheFirst({
-    cacheName: 'google-fonts-cache',
+    cacheName: cacheName('fonts-styles'),
     plugins: [
       new ExpirationPlugin({ maxEntries: 10, maxAgeSeconds: 31536000 }),
       new CacheableResponsePlugin({ statuses: [0, 200] }),
@@ -50,7 +84,7 @@ registerRoute(
 registerRoute(
   /^https:\/\/fonts\.gstatic\.com\/.*/i,
   new CacheFirst({
-    cacheName: 'google-fonts-webfonts',
+    cacheName: cacheName('fonts-files'),
     plugins: [
       new ExpirationPlugin({ maxEntries: 30, maxAgeSeconds: 31536000 }),
       new CacheableResponsePlugin({ statuses: [0, 200] }),
@@ -61,27 +95,42 @@ registerRoute(
 // ─── Stellar Notification Service Worker logic ────────────────────────────────
 // (merged from src/sw/stellar-notification-sw.ts)
 
-const ANNOUNCER_CONTRACT = 'CCJLJ2QRBJAAKIG6ELNQVXLLWMKKWVN5O2FKWUETHZGMPAD4MHK7WVWL';
-const STELLAR_RPC_URL = 'https://soroban-testnet.stellar.org';
 const DB_NAME = 'wraith-stellar-notifications';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'viewing-keys';
 const SYNC_TAG = 'stellar-payment-scan';
 const SYNC_INTERVAL_MINUTES = 15;
 
+// Wave 9 (#184): tag the page registers when it enqueues offline work.
+// The SW can't read the page's localStorage queue, so it just nudges every
+// client to run reconciliation itself.
+const QUEUE_SYNC_TAG = 'wraith-offline-queue';
+
 interface StoredViewingKey {
   publicKey: string;
-  encryptedViewingKey: string;
-  encryptedSpendingPubKey: string;
-  encryptedSpendingScalar: string;
   lastScannedLedger?: number;
   timestamp: number;
+  relayUrl?: string;
+  metaAddressHash?: string;
+  pushSubscription?: PushSubscriptionJSON;
+}
+
+interface PushSubscriptionJSON {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
 }
 
 interface NotificationData {
-  stealthAddress: string;
+  id: string;
+  stealthAddress?: string;
   amount?: string;
+  asset?: string;
+  sender?: string;
   timestamp: number;
+  url: string;
 }
 
 // ── IndexedDB helpers ──────────────────────────────────────────────────────────
@@ -97,6 +146,7 @@ function openDB(): Promise<IDBDatabase> {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'publicKey' });
         store.createIndex('timestamp', 'timestamp', { unique: false });
       }
+      createNotificationStore(db);
     };
   });
 }
@@ -127,39 +177,73 @@ async function updateLastScannedLedger(
 }
 
 // ── Stellar RPC helpers ────────────────────────────────────────────────────────
+//
+// Event reads go through the shared, paginated implementation in
+// src/lib/stellar/rpcEvents.ts. It follows the RPC cursor to the end of the
+// committed boundary, maps out-of-range requests to retention gaps, and reports
+// progress per page so a sync that is killed mid-way restarts at the first
+// ledger proven fully announced instead of at the tip. A page boundary can
+// split one ledger, so the boundary ledger is re-read rather than skipped.
 
-async function fetchLatestLedger(): Promise<number> {
-  const response = await fetch(STELLAR_RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-  });
-  const data = await response.json();
-  return data.result?.sequence || 0;
+async function notifyRetentionGap(publicKey: string, gap: RetentionGap): Promise<void> {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of clients) {
+    client.postMessage({ type: 'STELLAR_SCAN_RETENTION_GAP', publicKey, ...gap });
+  }
 }
 
-async function fetchAnnouncementEvents(
-  startLedger: number,
-  contractId: string = ANNOUNCER_CONTRACT,
-): Promise<{ events: unknown[]; latestLedger: number }> {
-  const response = await fetch(STELLAR_RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'getEvents',
-      params: {
+const matchNotifier: MatchNotifier = {
+  showNotification: (title, options) => self.registration.showNotification(title, options),
+  broadcast: async (message) => {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clients) client.postMessage(message);
+  },
+};
+
+/**
+ * Scans from the stored cursor through the shared lossless pager. The sealed scan key is
+ * opened first, so a locked or unregistered account costs no network. Each page is matched
+ * and notified BEFORE its cursor is persisted, and a lock between pages stops the scan
+ * without committing the unread page.
+ */
+async function scanStoredKey(
+  db: IDBDatabase,
+  storedKey: StoredViewingKey,
+  startLedger: number | undefined,
+): Promise<void> {
+  await scanPages({
+    backend: createIdbScanKeyBackend(),
+    publicKey: storedKey.publicKey,
+    notifyMatch: (match) => deliverMatch(matchNotifier, match),
+    readPages: (onPage) =>
+      fetchEventPages({
+        rpcUrl: getStellarNetworkConfig().rpcUrl,
+        contractId: getStellarContractId('announcer'),
+        // undefined lets the module clamp a first scan to the retention window.
         startLedger,
-        filters: [{ type: 'contract', contractIds: [contractId] }],
-        pagination: { limit: 1000 },
-      },
-    }),
+        onPage: (page) =>
+          onPage({
+            announcements: decodeAnnouncementEvents(page.events),
+            committedLedger: page.committedLedger,
+          }),
+      }),
+    commit: (nextLedger) => updateLastScannedLedger(db, storedKey.publicKey, nextLedger),
   });
-  const data = await response.json();
-  const events = data.result?.events || [];
-  const latestLedger = await fetchLatestLedger();
-  return { events, latestLedger };
+}
+
+async function scrubLegacyKeys(): Promise<void> {
+  try {
+    const db = await openDB();
+    try {
+      const scrubbed = await scrubLegacySpendingMaterial(db, STORE_NAME);
+      if (scrubbed > 0)
+        console.log('[app-sw] Removed legacy key fields from ' + scrubbed + ' record(s)');
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    console.error('[app-sw] Legacy key scrub failed:', error);
+  }
 }
 
 // ── Background sync handler ────────────────────────────────────────────────────
@@ -176,15 +260,15 @@ async function handleSync(): Promise<void> {
     });
 
     for (const storedKey of allKeys) {
-      const startLedger = storedKey.lastScannedLedger || 1;
-      const { events, latestLedger } = await fetchAnnouncementEvents(startLedger);
-
-      if (events.length > 0) {
-        console.log(`Found ${events.length} events for ${storedKey.publicKey}`);
-        // TODO: decrypt and scan with Wraith SDK when bundled in SW context
+      try {
+        await scanStoredKey(db, storedKey, storedKey.lastScannedLedger);
+      } catch (error) {
+        const gap = retentionGapFromError(error);
+        if (!gap) throw error;
+        // A stored cursor that fell out of the window is never advanced
+        // silently: surface the gap so the page can offer a recovery scan.
+        await notifyRetentionGap(storedKey.publicKey, gap);
       }
-
-      await updateLastScannedLedger(db, storedKey.publicKey, latestLedger);
     }
 
     db.close();
@@ -195,32 +279,41 @@ async function handleSync(): Promise<void> {
 
 // ── SW lifecycle ───────────────────────────────────────────────────────────────
 
-self.addEventListener('install', (event) => {
-  console.log('[app-sw] Installing — skip waiting');
-  event.waitUntil(self.skipWaiting());
-});
+// No `skipWaiting()` in `install` on purpose. A newly installed worker stays in
+// the `waiting` state until the page posts SKIP_WAITING (the "Reload" action in
+// the update prompt), so a deploy can never swap the app underneath an in-flight
+// transaction. A first install activates without waiting for anything.
+
+async function registerPeriodicSync(): Promise<void> {
+  if (!('periodicSync' in self.registration)) return;
+
+  try {
+    await (
+      self.registration as ServiceWorkerRegistration & {
+        periodicSync: { register(tag: string, opts: object): Promise<void> };
+      }
+    ).periodicSync.register(SYNC_TAG, {
+      minInterval: SYNC_INTERVAL_MINUTES * 60 * 1000,
+    });
+    console.log('[app-sw] Periodic sync registered');
+  } catch (error) {
+    console.error('[app-sw] Failed to register periodic sync:', error);
+  }
+}
 
 self.addEventListener('activate', (event) => {
   console.log('[app-sw] Activating');
   event.waitUntil(
     Promise.all([
       self.clients.claim(),
-      (async () => {
-        if ('periodicSync' in self.registration) {
-          try {
-            await (
-              self.registration as ServiceWorkerRegistration & {
-                periodicSync: { register(tag: string, opts: object): Promise<void> };
-              }
-            ).periodicSync.register(SYNC_TAG, {
-              minInterval: SYNC_INTERVAL_MINUTES * 60 * 1000,
-            });
-            console.log('[app-sw] Periodic sync registered');
-          } catch (error) {
-            console.error('[app-sw] Failed to register periodic sync:', error);
-          }
-        }
-      })(),
+      scrubLegacyKeys(),
+      // Drop every cache this app owns that is not part of the running version:
+      // superseded versions, newer versions left behind by a roll-back, and
+      // caches written by installs that predate explicit versioning.
+      purgeObsoleteCaches(self.caches).then((deleted) => {
+        if (deleted.length > 0) console.log('[app-sw] Purged obsolete caches:', deleted);
+      }),
+      registerPeriodicSync(),
     ]),
   );
 });
@@ -230,6 +323,16 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('sync', (event) => {
   if (event.tag === SYNC_TAG) {
     event.waitUntil(handleSync());
+    return;
+  }
+  if (event.tag === QUEUE_SYNC_TAG) {
+    event.waitUntil(
+      self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+        for (const client of clientList) {
+          client.postMessage({ type: 'OFFLINE_QUEUE_FLUSH' });
+        }
+      }),
+    );
   }
 });
 
@@ -241,17 +344,19 @@ self.addEventListener('notificationclick', (event) => {
   notification.close();
 
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-      for (const client of clients) {
-        if (client.url.includes('/receive') || client.url.includes('/stellar')) {
-          client.focus();
-          client.postMessage({ type: 'NAVIGATE_TO_MATCH', stealthAddress: data.stealthAddress });
-          return;
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      // Focus existing Wraith tab and navigate to /notifications
+      const existing = clientList.find((c) => c.url.includes(self.location.origin) && 'focus' in c);
+      if (existing) {
+        (existing as WindowClient).focus();
+        (existing as WindowClient).navigate(data?.url ?? '/notifications');
+        // Also post match info so the page can pre-highlight it
+        if (data?.stealthAddress) {
+          existing.postMessage({ type: 'NAVIGATE_TO_MATCH', stealthAddress: data.stealthAddress });
         }
+        return;
       }
-      if (clients.openWindow) {
-        return clients.openWindow('/receive?match=' + data.stealthAddress);
-      }
+      return self.clients.openWindow(data?.url ?? '/notifications');
     }),
   );
 });
@@ -259,11 +364,58 @@ self.addEventListener('notificationclick', (event) => {
 // ── Message handler ────────────────────────────────────────────────────────────
 
 self.addEventListener('message', (event) => {
-  const { type, publicKey, encryptedViewingKey, encryptedSpendingPubKey, encryptedSpendingScalar } =
-    event.data;
+  const { type, publicKey } = event.data;
+
+  const forbidden = findSpendingSecretField(event.data);
+  if (forbidden) {
+    console.error('[app-sw] Dropped message: "' + forbidden + '" must never reach the worker');
+    (event.source as Client)?.postMessage({
+      type: 'VIEWING_KEY_ERROR',
+      error: 'Spending secrets are not accepted by the service worker',
+    });
+    return;
+  }
 
   if (type === 'SKIP_WAITING') {
     self.skipWaiting();
+    return;
+  }
+
+  if (type === 'RECOVER_SCAN_CURSOR') {
+    event.waitUntil(
+      (async () => {
+        const db = await openDB();
+        try {
+          const recoveryLedger = Number(event.data.oldestAvailableLedger);
+          if (
+            typeof publicKey !== 'string' ||
+            !Number.isSafeInteger(recoveryLedger) ||
+            recoveryLedger <= 0
+          ) {
+            return;
+          }
+          const storedKey = await new Promise<StoredViewingKey | undefined>((resolve, reject) => {
+            const request = db
+              .transaction(STORE_NAME, 'readonly')
+              .objectStore(STORE_NAME)
+              .get(publicKey);
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => resolve(request.result);
+          });
+          if (!storedKey) return;
+          await scanStoredKey(db, storedKey, recoveryLedger);
+          const clients = await self.clients.matchAll({
+            type: 'window',
+            includeUncontrolled: true,
+          });
+          clients.forEach((client) =>
+            client.postMessage({ type: 'STELLAR_SCAN_RECOVERY_COMPLETE', publicKey }),
+          );
+        } finally {
+          db.close();
+        }
+      })(),
+    );
     return;
   }
 
@@ -271,22 +423,15 @@ self.addEventListener('message', (event) => {
     event.waitUntil(
       (async () => {
         try {
+          if (typeof publicKey !== 'string' || publicKey.length === 0) {
+            throw new Error('Missing publicKey');
+          }
           const db = await openDB();
-          const transaction = db.transaction([STORE_NAME], 'readwrite');
-          const store = transaction.objectStore(STORE_NAME);
-          const data: StoredViewingKey = {
-            publicKey,
-            encryptedViewingKey,
-            encryptedSpendingPubKey,
-            encryptedSpendingScalar,
-            timestamp: Date.now(),
-          };
-          await new Promise<void>((resolve, reject) => {
-            const request = store.put(data);
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => resolve();
-          });
-          db.close();
+          try {
+            await upsertAccountRecord(db, STORE_NAME, publicKey);
+          } finally {
+            db.close();
+          }
           (event.source as Client)?.postMessage({ type: 'VIEWING_KEY_REGISTERED' });
         } catch (error) {
           console.error('[app-sw] Failed to register viewing key:', error);
@@ -311,6 +456,8 @@ self.addEventListener('message', (event) => {
             request.onerror = () => reject(request.error);
             request.onsuccess = () => resolve();
           });
+
+          await removeScanKey(createIdbScanKeyBackend(), publicKey);
 
           // Unregister periodic sync if no keys remain
           const allKeys = await new Promise<StoredViewingKey[]>((resolve, reject) => {
@@ -341,12 +488,147 @@ self.addEventListener('message', (event) => {
   if (type === 'TRIGGER_SCAN') {
     event.waitUntil(handleSync());
   }
+
+  // Push subscription management
+  if (type === 'REGISTER_PUSH_SUBSCRIPTION') {
+    event.waitUntil(
+      (async () => {
+        try {
+          const { subscription, metaAddressHash, relayUrl } = event.data ?? {};
+          if (!subscription || !metaAddressHash) {
+            throw new Error('Missing subscription or metaAddressHash');
+          }
+
+          // Store subscription info in IndexedDB
+          const db = await openDB();
+          const transaction = db.transaction([STORE_NAME], 'readwrite');
+          const store = transaction.objectStore(STORE_NAME);
+
+          // Update existing entry or create new one
+          const existing = await new Promise<StoredViewingKey | undefined>((resolve, reject) => {
+            const request = store.get(subscription.keys?.p256dh || 'default');
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => resolve(request.result);
+          });
+
+          const entry: StoredViewingKey = existing || {
+            publicKey: subscription.keys?.p256dh || 'default',
+            timestamp: Date.now(),
+          };
+
+          // Store relay URL and meta-address hash
+          (entry as any).relayUrl = relayUrl;
+          (entry as any).metaAddressHash = metaAddressHash;
+          (entry as any).pushSubscription = subscription;
+
+          await new Promise<void>((resolve, reject) => {
+            const request = store.put(entry);
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => resolve();
+          });
+
+          db.close();
+          (event.source as Client)?.postMessage({ type: 'PUSH_SUBSCRIPTION_REGISTERED' });
+        } catch (error) {
+          console.error('[app-sw] Failed to register push subscription:', error);
+          (event.source as Client)?.postMessage({
+            type: 'PUSH_SUBSCRIPTION_ERROR',
+            error: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      })(),
+    );
+  }
+
+  if (type === 'UNREGISTER_PUSH_SUBSCRIPTION') {
+    event.waitUntil(
+      (async () => {
+        try {
+          const { subscription, metaAddressHash } = event.data ?? {};
+          if (!subscription) {
+            throw new Error('Missing subscription');
+          }
+
+          const db = await openDB();
+          const transaction = db.transaction([STORE_NAME], 'readwrite');
+          const store = transaction.objectStore(STORE_NAME);
+
+          // Remove push subscription from entry
+          const existing = await new Promise<StoredViewingKey | undefined>((resolve, reject) => {
+            const request = store.get(subscription.keys?.p256dh || 'default');
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => resolve(request.result);
+          });
+
+          if (existing) {
+            delete (existing as any).relayUrl;
+            delete (existing as any).metaAddressHash;
+            delete (existing as any).pushSubscription;
+
+            await new Promise<void>((resolve, reject) => {
+              const request = store.put(existing);
+              request.onerror = () => reject(request.error);
+              request.onsuccess = () => resolve();
+            });
+          }
+
+          db.close();
+          (event.source as Client)?.postMessage({ type: 'PUSH_SUBSCRIPTION_UNREGISTERED' });
+        } catch (error) {
+          console.error('[app-sw] Failed to unregister push subscription:', error);
+          (event.source as Client)?.postMessage({
+            type: 'PUSH_SUBSCRIPTION_ERROR',
+            error: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      })(),
+    );
+  }
 });
 
 // ── Push (future) ──────────────────────────────────────────────────────────────
 
-self.addEventListener('push', (_event) => {
-  // Reserved for future server-sent push notifications.
+async function broadcastToClients(payload: ValidatedPushPayload, timestamp: number): Promise<void> {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of clients) {
+    client.postMessage({
+      type: 'WRAITH_NOTIFICATION',
+      channel: 'wraith-notifications',
+      payload: { ...payload, timestamp },
+    });
+  }
+}
+
+self.addEventListener('push', (event: PushEvent) => {
+  event.waitUntil(
+    (async () => {
+      const db = await openDB();
+      try {
+        const result = await deliverPushNotification(
+          event.data?.text() ?? '',
+          self.location.origin,
+          {
+            claim: (id) => claimNotificationId(db, id),
+            release: (id) => releaseNotificationId(db, id),
+            show: (presentation: NotificationPresentation) =>
+              self.registration.showNotification(presentation.title, {
+                body: presentation.body,
+                icon: '/favicon-32x32.png',
+                badge: '/favicon-16x16.png',
+                tag: presentation.tag,
+                data: presentation.data,
+              }),
+            broadcast: broadcastToClients,
+          },
+        );
+        if (result === 'rejected') console.warn('[app-sw] Rejected invalid push payload');
+        if (result === 'duplicate') console.log('[app-sw] Skipped duplicate notification');
+        if (result === 'delivered') await pruneNotificationIds(db);
+      } finally {
+        db.close();
+      }
+    })(),
+  );
 });
 
 export {};

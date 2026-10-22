@@ -14,13 +14,13 @@ import {
 import {
   deriveStealthKeys,
   encodeStealthMetaAddress,
-  scanAnnouncements,
   signStellarTransaction,
   STEALTH_SIGNING_MESSAGE,
   SCHEME_ID,
 } from '@wraith-protocol/sdk/chains/stellar';
 import type { Announcement, MatchedAnnouncement } from '@wraith-protocol/sdk/chains/stellar';
 import { useTranslation } from 'react-i18next';
+import { useScanStrategy } from '@/context/ScanStrategyContext';
 import { StellarReceiveView } from '@/components/StellarReceiveView';
 import { QRCodeModal } from '@/components/QRCodeModal';
 import { useStealthKeys } from '@/context/StealthKeysContext';
@@ -32,6 +32,7 @@ import { StellarLink } from '@/components/StellarLink';
 import { PrivacyBadge } from '@/components/PrivacyBadge';
 import { computePrivacyScore } from '@/lib/privacy-score';
 import { STELLAR_NETWORK } from '@/config';
+import { getStellarContractId } from '@/lib/stellar/deployments';
 import { fetchWithRetry, withRetry, RetryExhaustedError } from '@/lib/stellar/retry';
 import { useActivityStore } from '@/stores/activityStore';
 import type { ImportResult } from '@/lib/stealthLabels';
@@ -42,117 +43,25 @@ import { NetworkMismatchModal } from '@/components/NetworkMismatchModal';
 import { useStealthLabels } from '@/hooks/useStealthLabels';
 import { StellarBatchWithdrawModal } from '@/components/StellarBatchWithdrawModal';
 import { createStellarQrUri } from '@/utils/qr';
+import { readScanCursor, writeScanCursor, type RetentionGap } from '@/lib/stellar/scannerCursor';
+import { fetchAnnouncementEvents } from '@/lib/stellar/announcementRpc';
 
-const ANNOUNCER_CONTRACT = 'CCJLJ2QRBJAAKIG6ELNQVXLLWMKKWVN5O2FKWUETHZGMPAD4MHK7WVWL';
-const REGISTRY_CONTRACT = 'CC2LAUCXYOPJ4DV4CYXNXYAXRDVOTMAWFF76W4WFD5OVQBD6TN4PYYJ5';
-
-async function fetchAnnouncementEvents(
+// Fetches announcements on the main thread. Only used to support the
+// `window.scanAnnouncementsMock` test hook (see e2e/fixtures.ts) which needs
+// main-thread access to the parsed announcements. The real, production scan
+// path fetches and scans off the main thread inside stellar-scanner.worker.ts
+// and shares this module's pagination and retention handling.
+async function fetchAnnouncementsBestEffort(
   rpcUrl: string,
   contractId: string,
 ): Promise<Announcement[]> {
-  const all: Announcement[] = [];
-
   try {
-    let startLedger = 1;
-    const probeRes = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 0,
-        method: 'getEvents',
-        params: {
-          startLedger: 1,
-          filters: [{ type: 'contract', contractIds: [contractId] }],
-          pagination: { limit: 1 },
-        },
-      }),
-    });
-    const probeData = await probeRes.json();
-
-    if (probeData.error?.message) {
-      const match = probeData.error.message.match(/range:\s*(\d+)\s*-\s*(\d+)/);
-      if (match) {
-        const oldest = parseInt(match[1], 10);
-        const latest = parseInt(match[2], 10);
-        startLedger = Math.max(oldest, latest - 5000);
-      } else {
-        return all;
-      }
-    }
-
-    let cursor: string | undefined;
-    let hasMore = true;
-
-    while (hasMore) {
-      const params: Record<string, unknown> = {
-        filters: [{ type: 'contract', contractIds: [contractId] }],
-        pagination: { limit: 1000 },
-      };
-
-      if (cursor) {
-        (params.pagination as Record<string, unknown>).cursor = cursor;
-      } else {
-        params.startLedger = startLedger;
-      }
-
-      const res = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'getEvents', params }),
-      });
-
-      const data = await res.json();
-      const events = data.result?.events ?? [];
-
-      for (const event of events) {
-        try {
-          const ann = parseAnnouncementEvent(event);
-          if (ann) all.push(ann);
-        } catch (err) {
-          console.error('Failed to parse announcement event:', err);
-        }
-      }
-
-      if (events.length < 1000) {
-        hasMore = false;
-      } else {
-        cursor = data.result?.cursor;
-        if (!cursor) hasMore = false;
-      }
-    }
+    const { announcements } = await fetchAnnouncementEvents({ rpcUrl, contractId });
+    return announcements;
   } catch {
-    // Events API may not be available
+    // The events API may be unavailable; the mock hook tolerates an empty list.
+    return [];
   }
-
-  return all;
-}
-
-function parseAnnouncementEvent(event: Record<string, unknown>): Announcement | null {
-  const topics = event.topic as string[];
-  if (!topics || topics.length < 3) return null;
-
-  const schemeIdScVal = xdr.ScVal.fromXDR(topics[1], 'base64');
-  const schemeId = schemeIdScVal.u32();
-
-  const stealthScVal = xdr.ScVal.fromXDR(topics[2], 'base64');
-  const stealthScAddress = stealthScVal.address();
-  const stealthAddress = Address.fromScAddress(stealthScAddress).toString();
-
-  const valueScVal = xdr.ScVal.fromXDR(event.value as string, 'base64');
-  const valueVec = valueScVal.vec();
-  if (!valueVec || valueVec.length < 3) return null;
-
-  const callerScAddress = valueVec[0].address();
-  const caller = Address.fromScAddress(callerScAddress).toString();
-
-  const ephBytes = valueVec[1].bytes();
-  const ephemeralPubKey = bytesToHex(new Uint8Array(ephBytes));
-
-  const metaBytes = valueVec[2].bytes();
-  const metadata = bytesToHex(new Uint8Array(metaBytes));
-
-  return { schemeId, stealthAddress, caller, ephemeralPubKey, metadata };
 }
 
 function StellarMatchCardContainer({
@@ -673,6 +582,7 @@ export function StellarReceive() {
     useStellarWallet();
   const { stellarKeys, stellarMetaAddress, setStellarKeys, setStellarMetaAddress } =
     useStealthKeys();
+  const { strategy: scanStrategy } = useScanStrategy();
   const addActivity = useActivityStore((state) => state.addEntry);
   const updateActivity = useActivityStore((state) => state.updateStatus);
   const notifications = useStellarNotifications();
@@ -692,6 +602,7 @@ export function StellarReceive() {
   }, []);
   const [hasScanned, setHasScanned] = useState(false);
   const [error, setError] = useState('');
+  const [retentionGap, setRetentionGap] = useState<RetentionGap | null>(null);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [retryStatus, setRetryStatus] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
@@ -717,15 +628,6 @@ export function StellarReceive() {
       return next;
     });
   }, []);
-
-  const toggleSelectAll = useCallback(() => {
-    setSelectedAddresses((prev) => {
-      if (prev.size === filteredMatched.length && filteredMatched.length > 0) {
-        return new Set();
-      }
-      return new Set(filteredMatched.map((m) => m.stealthAddress));
-    });
-  }, [filteredMatched]);
 
   const selectedMatches = useMemo(() => {
     return matched.filter((m) => selectedAddresses.has(m.stealthAddress));
@@ -808,6 +710,15 @@ export function StellarReceive() {
     });
   }, [matched, labels, showHidden, searchQuery, activeTag]);
 
+  const toggleSelectAll = useCallback(() => {
+    setSelectedAddresses((prev) => {
+      if (prev.size === filteredMatched.length && filteredMatched.length > 0) {
+        return new Set();
+      }
+      return new Set(filteredMatched.map((m) => m.stealthAddress));
+    });
+  }, [filteredMatched]);
+
   const hiddenCount = useMemo(() => {
     return matched.filter((m) => labels[m.stealthAddress]?.hiddenAt).length;
   }, [matched, labels]);
@@ -831,7 +742,7 @@ export function StellarReceive() {
           accountResponse.sequenceNumber(),
         );
 
-        const contract = new Contract(REGISTRY_CONTRACT);
+        const contract = new Contract(getStellarContractId('registry'));
         const tx = new TransactionBuilder(sourceAccount, { fee: '100', networkPassphrase })
           .addOperation(
             contract.call(
@@ -1091,7 +1002,7 @@ export function StellarReceive() {
         accountResponse.sequenceNumber(),
       );
 
-      const contract = new Contract(REGISTRY_CONTRACT);
+      const contract = new Contract(getStellarContractId('registry'));
       const metaAddressBytes = new Uint8Array(64);
       metaAddressBytes.set(stellarKeys.spendingPubKey, 0);
       metaAddressBytes.set(stellarKeys.viewingPubKey, 32);
@@ -1179,40 +1090,174 @@ export function StellarReceive() {
     }
   }, [stellarKeys, address, signTransaction]);
 
-  const scanPayments = useCallback(async () => {
-    if (!stellarKeys) return;
-    setIsScanning(true);
-    setError('');
+  const scanPayments = useCallback(
+    async (recoveryStartLedger?: number) => {
+      if (!stellarKeys) return;
+      setIsScanning(true);
+      setError('');
 
-    try {
-      const announcements = await fetchAnnouncementEvents(
-        STELLAR_NETWORK.rpcUrl,
-        ANNOUNCER_CONTRACT,
-      );
-      const scanFn = (window as any).scanAnnouncementsMock || scanAnnouncements;
-      const results = scanFn(
-        announcements,
-        stellarKeys.viewingKey,
-        stellarKeys.spendingPubKey,
-        stellarKeys.spendingScalar,
-      );
-      if (workerRef.current) {
-        workerRef.current.terminate();
+      // Resolve before touching the worker: scanning an unverified announcer ID
+      // returns no events, which would look exactly like an empty inbox.
+      let announcerContract: string;
+      try {
+        announcerContract = getStellarContractId('announcer');
+      } catch (err) {
+        setIsScanning(false);
+        setError(err instanceof Error ? err.message : t('common.scanFailed'));
+        return;
       }
 
-      workerRef.current = new Worker(
-        new URL('../workers/stellar-scanner.worker.ts', import.meta.url),
-        { type: 'module' },
-      );
-      setMatched(results);
-      setHasScanned(true);
-      trackEvent('scan_triggered');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.scanFailed'));
-    } finally {
-      setIsScanning(false);
-    }
-  }, [stellarKeys, t]);
+      // Test hook: e2e/fixtures.ts injects a mock scan function on `window` so
+      // specs can control match results without real crypto. It runs on the
+      // main thread since a Worker doesn't share `window` with the page.
+      const mockScan = (window as any).scanAnnouncementsMock;
+      if (mockScan) {
+        try {
+          const announcements = await fetchAnnouncementsBestEffort(
+            STELLAR_NETWORK.rpcUrl,
+            announcerContract,
+          );
+          const results = mockScan(
+            announcements,
+            stellarKeys.viewingKey,
+            stellarKeys.spendingPubKey,
+            stellarKeys.spendingScalar,
+          );
+          setMatched(results);
+          setHasScanned(true);
+          trackEvent('scan_triggered');
+        } catch (err) {
+          setError(err instanceof Error ? err.message : t('common.scanFailed'));
+        } finally {
+          setIsScanning(false);
+        }
+        return;
+      }
+
+      // Restart cleanly: tear down any in-flight scan before starting a new
+      // one, so a strategy change always takes effect on the next scan without
+      // requiring a page reload.
+      if (workerRef.current) {
+        workerRef.current.terminate();
+        workerRef.current = null;
+      }
+
+      const worker = new Worker(new URL('../workers/stellar-scanner.worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      workerRef.current = worker;
+
+      worker.onmessage = (event: MessageEvent) => {
+        const {
+          type,
+          results,
+          nextLedger,
+          committedLedger,
+          matched: pageMatches,
+          requestedLedger,
+          oldestAvailableLedger,
+          error: workerError,
+        } = event.data ?? {};
+        if (type === 'PAGE') {
+          // Each page advances the stored cursor only once its matches have been
+          // handed to the page, so an interrupted scan resumes at the first
+          // ledger proven complete instead of at the tip. A ledger that the RPC
+          // page boundary split is re-read, and matches are deduped below.
+          if (address && Number.isSafeInteger(committedLedger)) {
+            writeScanCursor(localStorage, address, committedLedger + 1);
+          }
+          if (Array.isArray(pageMatches) && pageMatches.length > 0) {
+            setMatched((previous) => {
+              const seen = new Set(previous.map((match) => match.stealthAddress));
+              const fresh = pageMatches.filter((match) => !seen.has(match.stealthAddress));
+              return fresh.length > 0 ? [...previous, ...fresh] : previous;
+            });
+          }
+          return;
+        }
+        if (type === 'SUCCESS') {
+          setMatched(results ?? []);
+          setHasScanned(true);
+          setRetentionGap(null);
+          if (address && Number.isSafeInteger(nextLedger)) {
+            writeScanCursor(localStorage, address, nextLedger);
+          }
+          trackEvent('scan_triggered');
+        } else if (type === 'RETENTION_GAP') {
+          setRetentionGap({ requestedLedger, oldestAvailableLedger });
+        } else {
+          setError(workerError || t('common.scanFailed'));
+        }
+        setIsScanning(false);
+        worker.terminate();
+        if (workerRef.current === worker) {
+          workerRef.current = null;
+        }
+      };
+
+      worker.onerror = () => {
+        setError(t('common.scanFailed'));
+        setIsScanning(false);
+        worker.terminate();
+        if (workerRef.current === worker) {
+          workerRef.current = null;
+        }
+      };
+
+      worker.postMessage({
+        rpcUrl: STELLAR_NETWORK.rpcUrl,
+        announcerContract,
+        viewingKey: stellarKeys.viewingKey,
+        spendingPubKey: stellarKeys.spendingPubKey,
+        spendingScalar: stellarKeys.spendingScalar,
+        strategy: scanStrategy,
+        startLedger:
+          recoveryStartLedger ?? (address ? readScanCursor(localStorage, address) : undefined),
+      });
+    },
+    [stellarKeys, scanStrategy, address, t],
+  );
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      const message = event.data ?? {};
+      if (message.publicKey !== address) return;
+      if (message.type === 'STELLAR_SCAN_RETENTION_GAP') {
+        setRetentionGap({
+          requestedLedger: message.requestedLedger,
+          oldestAvailableLedger: message.oldestAvailableLedger,
+        });
+      } else if (message.type === 'STELLAR_SCAN_RECOVERY_COMPLETE') {
+        setRetentionGap(null);
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
+  }, [address]);
+
+  const recoverRetentionGap = useCallback(() => {
+    if (!retentionGap) return;
+    navigator.serviceWorker?.controller?.postMessage({
+      type: 'RECOVER_SCAN_CURSOR',
+      publicKey: address,
+      oldestAvailableLedger: retentionGap.oldestAvailableLedger,
+    });
+    void scanPayments(retentionGap.oldestAvailableLedger);
+  }, [address, retentionGap, scanPayments]);
+
+  // (Re)seal the background-scan key whenever it can be used: notifications on,
+  // worker ready, keys unlocked. Lock (disconnect / app idle lock) removes the
+  // wrapping key; this puts a fresh one back once the keys exist again.
+  const registerScanKey = notifications.registerViewingKey;
+  const scanNotificationsEnabled = notifications.state.enabled;
+  const scanWorkerReady = notifications.state.swRegistered;
+  useEffect(() => {
+    if (!address || !stellarKeys || !scanNotificationsEnabled || !scanWorkerReady) return;
+    registerScanKey(address, stellarKeys).catch((error: unknown) => {
+      console.error('Failed to register viewing key:', error);
+    });
+  }, [address, stellarKeys, scanNotificationsEnabled, scanWorkerReady, registerScanKey]);
 
   const handleToggleNotifications = useCallback(async () => {
     if (notifications.state.enabled) {
@@ -1221,12 +1266,9 @@ export function StellarReceive() {
         await notifications.unregisterViewingKey(address);
       }
     } else {
-      await notifications.enableNotifications();
-      if (address && stellarKeys) {
-        await notifications.registerViewingKey(address, stellarKeys);
-      }
+      await notifications.enableNotifications(); // the effect above seals the key
     }
-  }, [notifications, address, stellarKeys]);
+  }, [notifications, address]);
 
   const handleFireTestNotification = useCallback(async () => {
     try {
@@ -1237,7 +1279,7 @@ export function StellarReceive() {
     }
   }, [notifications]);
 
-  if (!isConnected) {
+  if (!isConnected && !stellarKeys) {
     return (
       <section className="flex flex-col gap-3">
         <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
@@ -1324,12 +1366,17 @@ export function StellarReceive() {
         regHash={regHash}
         isScanning={isScanning}
         hasScanned={hasScanned}
+        scanStrategyLabel={t('scanStrategy.activeStrategy', {
+          strategy: t(`scanStrategy.${scanStrategy}Label`),
+        })}
         matchCount={matched.length}
         error={error}
+        retentionGap={retentionGap}
         retryStatus={retryStatus}
         onDeriveKeys={deriveKeysFromWallet}
         onRegister={registerOnChain}
-        onScan={scanPayments}
+        onScan={() => scanPayments()}
+        onRecoverRetentionGap={recoverRetentionGap}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         filteredMatchCount={filteredMatched.length}
