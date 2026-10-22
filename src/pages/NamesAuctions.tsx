@@ -8,6 +8,7 @@ import { useNameHistory } from '@/store/nameHistoryStore';
 import { useNameWatchlistStore, type AuctionBid } from '@/store/nameWatchlistStore';
 import { stellarTxUrl } from '@/lib/explorer';
 import { submitBidWithRecovery } from '@/lib/stellar/auctionBidSubmission';
+import { reconcileUnknownBids } from '@/lib/stellar/auctionBidReconciliation';
 import { tryGetStellarContractId } from '@/lib/stellar/deployments';
 import {
   MIN_AUCTION_BID_INCREMENT,
@@ -21,6 +22,7 @@ import {
   getNameAuction,
   getNameAuctionConfig,
   submitTransaction,
+  getNameBidTransactionStatus,
   type NameAuction,
   type NameAuctionConfig,
 } from '@/lib/stellar/names';
@@ -147,6 +149,29 @@ export default function NamesAuctions() {
     const timer = globalThis.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 30_000);
     return () => globalThis.clearInterval(timer);
   }, []);
+
+  // Reconcile ambiguous submissions after unlock/reload and retry periodically.
+  // Only authoritative Soroban SUCCESS/FAILED results change persisted state.
+  useEffect(() => {
+    if (!unlocked) return;
+    let active = true;
+    const reconcile = async () => {
+      try {
+        await reconcileUnknownBids(bids, getNameBidTransactionStatus, async (name, nextStatus, hash) => {
+          if (active) await updateBidSubmission(name, nextStatus, hash);
+        });
+      } catch {
+        // Keep unknown/pending state on RPC or persistence errors; the next
+        // interval retries without enabling reveal, refund, or another bid.
+      }
+    };
+    void reconcile();
+    const timer = globalThis.setInterval(() => void reconcile(), 15_000);
+    return () => {
+      active = false;
+      globalThis.clearInterval(timer);
+    };
+  }, [bids, unlocked, updateBidSubmission]);
 
   const trackAuction = async () => {
     const name = lookupName
