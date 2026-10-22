@@ -132,7 +132,11 @@ describe('auction bid submission recovery', () => {
     });
 
     expect(result.status).toBe('committed');
-    expect(calls).toEqual(['persist:pending:prepared-hash', 'broadcast']);
+    expect(calls).toEqual([
+      'persist:pending:prepared-hash',
+      'broadcast',
+      'persist:committed:prepared-hash',
+    ]);
     expect(updateBidSubmission).toHaveBeenCalledWith('nova', 'committed', 'prepared-hash');
   });
 
