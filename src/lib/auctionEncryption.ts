@@ -27,6 +27,8 @@ export interface AuctionBid {
   depositStroops: string;
   saltHex: string;
   revealed: boolean;
+  submissionStatus?: 'pending' | 'committed' | 'failed' | 'unknown';
+  transactionHash?: string;
 }
 
 export const AUCTION_VAULT_VERSION = 1;
@@ -391,6 +393,9 @@ export function isAuctionBid(value: unknown): value is AuctionBid {
     typeof b.amountStroops === 'string' &&
     typeof b.depositStroops === 'string' &&
     typeof b.saltHex === 'string' &&
-    typeof b.revealed === 'boolean'
+    typeof b.revealed === 'boolean' &&
+    (b.submissionStatus === undefined ||
+      ['pending', 'committed', 'failed', 'unknown'].includes(String(b.submissionStatus))) &&
+    (b.transactionHash === undefined || typeof b.transactionHash === 'string')
   );
 }

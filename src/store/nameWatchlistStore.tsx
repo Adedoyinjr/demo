@@ -53,6 +53,11 @@ interface NameWatchlistState {
   watchAuction: (auction: WatchedNameAuction) => void;
   unwatchAuction: (name: string) => void;
   saveBid: (bid: AuctionBid) => Promise<void>;
+  updateBidSubmission: (
+    name: string,
+    submissionStatus: NonNullable<AuctionBid['submissionStatus']>,
+    transactionHash?: string,
+  ) => Promise<void>;
   markBidRevealed: (name: string) => Promise<void>;
   removeBid: (name: string) => Promise<void>;
   exportBackup: () => Promise<string>;
@@ -421,6 +426,27 @@ export const useNameWatchlistStore = create<NameWatchlistState>((set, get) => ({
     // before it is trusted for on-chain submission.
     await verifyStoredBids(bids);
     set({ bids, watchedAuctions: watched });
+  },
+
+  async updateBidSubmission(name, submissionStatus, transactionHash) {
+    if (get().status !== 'unlocked') {
+      throw new Error('Vault is locked. Unlock with your passphrase before updating a bid.');
+    }
+    const key = normalizeName(name);
+    const bid = get().bids[key];
+    if (!bid) {
+      throw new Error(`No recovery record exists for ${key}.`);
+    }
+    const updatedBid: AuctionBid = { ...bid, submissionStatus };
+    if ((submissionStatus === 'committed' || submissionStatus === 'unknown') && transactionHash) {
+      updatedBid.transactionHash = transactionHash;
+    } else {
+      delete updatedBid.transactionHash;
+    }
+    const bids = { ...get().bids, [key]: updatedBid };
+    await persistEncrypted(get().watchedAuctions, bids);
+    await verifyStoredBids(bids);
+    set({ bids });
   },
 
   async markBidRevealed(name) {

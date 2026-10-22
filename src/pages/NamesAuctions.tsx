@@ -7,6 +7,7 @@ import { useContacts } from '@/store/contactsStore';
 import { useNameHistory } from '@/store/nameHistoryStore';
 import { useNameWatchlistStore, type AuctionBid } from '@/store/nameWatchlistStore';
 import { stellarTxUrl } from '@/lib/explorer';
+import { submitBidWithRecovery } from '@/lib/stellar/auctionBidSubmission';
 import {
   MIN_AUCTION_BID_INCREMENT,
   NAMES_CONTRACT_ID,
@@ -38,6 +39,13 @@ function formatXlm(stroops: bigint) {
   return fraction ? `${whole}.${fraction} XLM` : `${whole} XLM`;
 }
 
+function formatXlmInput(stroops: string) {
+  const amount = BigInt(stroops);
+  const whole = amount / STROOPS_PER_XLM;
+  const fraction = (amount % STROOPS_PER_XLM).toString().padStart(7, '0').replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
 function formatEndsAt(timestamp: number) {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
@@ -63,6 +71,7 @@ export default function NamesAuctions() {
   const watchAuction = useNameWatchlistStore((state) => state.watchAuction);
   const unwatchAuction = useNameWatchlistStore((state) => state.unwatchAuction);
   const saveBid = useNameWatchlistStore((state) => state.saveBid);
+  const updateBidSubmission = useNameWatchlistStore((state) => state.updateBidSubmission);
   const markBidRevealed = useNameWatchlistStore((state) => state.markBidRevealed);
   const removeBid = useNameWatchlistStore((state) => state.removeBid);
 
@@ -191,6 +200,10 @@ export default function NamesAuctions() {
       : parsedBid !== null && parsedBid < minimumBid
         ? `Minimum bid is ${formatXlm(minimumBid)}.`
         : '';
+  const selectedBid = selectedAuction ? bids[selectedAuction.name] : undefined;
+  const retryingBid = selectedBid?.submissionStatus === 'failed';
+  const selectedBidCannotRetry =
+    selectedBid?.submissionStatus === 'pending' || selectedBid?.submissionStatus === 'unknown';
 
   const placeBid = async () => {
     if (!unlocked) {
@@ -201,42 +214,78 @@ export default function NamesAuctions() {
     const action = `bid:${selectedAuction.name}`;
     setPendingAction(action);
     setError('');
+    setTxHash('');
     try {
-      const salt = globalThis.crypto.getRandomValues(new Uint8Array(32));
-      const saltHex = Array.from(salt, (byte) => byte.toString(16).padStart(2, '0')).join('');
+      const existingBid = bids[selectedAuction.name];
+      if (existingBid && existingBid.submissionStatus !== 'failed') {
+        throw new Error('This bid cannot be retried until its submission status is confirmed.');
+      }
+      if (
+        existingBid &&
+        existingBid.submissionStatus === 'failed' &&
+        parsedBid.toString() !== existingBid.amountStroops
+      ) {
+        throw new Error('A retry must use the original bid amount and recovery secret.');
+      }
+      const saltHex =
+        existingBid?.submissionStatus === 'failed'
+          ? existingBid.saltHex
+          : Array.from(globalThis.crypto.getRandomValues(new Uint8Array(32)), (byte) =>
+              byte.toString(16).padStart(2, '0'),
+            ).join('');
+      const bid: AuctionBid =
+        existingBid?.submissionStatus === 'failed'
+          ? existingBid
+          : {
+              name: selectedAuction.name,
+              amountStroops: parsedBid.toString(),
+              depositStroops: parsedBid.toString(),
+              saltHex,
+              revealed: false,
+            };
       const commitmentHex = await computeNameBidCommitment(
         address,
         selectedAuction.name,
-        parsedBid,
+        BigInt(bid.amountStroops),
         saltHex,
       );
-      // Persist and verify the recovery record BEFORE signing or broadcasting the
-      // on-chain commit. If storage or verification fails, stop here and show an
-      // error: no transaction is ever submitted without a durable recovery record.
-      await saveBid({
-        name: selectedAuction.name,
-        amountStroops: parsedBid.toString(),
-        depositStroops: parsedBid.toString(),
-        saltHex,
-        revealed: false,
+      const result = await submitBidWithRecovery(bid, {
+        saveBid,
+        updateBidSubmission,
+        buildTransaction: () =>
+          buildCommitNameBidTransaction(address, {
+            name: selectedAuction.name,
+            commitmentHex,
+            deposit: BigInt(bid.depositStroops),
+          }),
+        signTransaction,
+        submitTransaction,
       });
-      const submitted = await submitAuctionTransaction(action, () =>
-        buildCommitNameBidTransaction(address, {
-          name: selectedAuction.name,
-          commitmentHex,
-          deposit: parsedBid,
-        }),
-      );
-      if (submitted) {
+      if (result.status === 'committed') {
+        setTxHash(result.transactionHash);
         watchAuction({ name: selectedAuction.name, endsAt: selectedAuction.revealEnd });
         setSelectedAuction(null);
         setBidAmount('');
+        await refreshAuctions();
+      } else if (result.status === 'failed') {
+        const message = result.error instanceof Error ? result.error.message : 'Transaction failed';
+        setError(
+          `Bid was not submitted: ${message} Your encrypted secret is saved; retry is safe.`,
+        );
+      } else {
+        const message =
+          result.error instanceof Error
+            ? result.error.message
+            : 'The submission outcome is unknown.';
+        setError(
+          `${message} Your encrypted secret is preserved. Do not retry until you confirm the transaction was not submitted.`,
+        );
       }
-      // If submission fails or its outcome is ambiguous, the persisted recovery
-      // record is retained so the bid can be retried or revealed after a reload.
     } catch (commitmentError) {
       setError(
-        commitmentError instanceof Error ? commitmentError.message : 'Failed to prepare bid',
+        commitmentError instanceof Error
+          ? commitmentError.message
+          : 'Failed to prepare or persist bid recovery material.',
       );
     } finally {
       setPendingAction('');
@@ -649,6 +698,8 @@ export default function NamesAuctions() {
           auctions.map((auction) => {
             const phase = phaseFor(auction, now);
             const bid = bids[auction.name];
+            const bidStatus = bid?.submissionStatus ?? 'committed';
+            const hasCommittedBid = Boolean(bid && bidStatus === 'committed');
             const isWinner = auction.highestBidder === address;
             const isWatched = watchedAuctions.some((item) => item.name === auction.name);
             return (
@@ -701,10 +752,42 @@ export default function NamesAuctions() {
                       Your bid
                     </dt>
                     <dd className="mt-1 font-mono text-xs text-on-surface">
-                      {bid ? formatXlm(BigInt(bid.amountStroops)) : '—'}
+                      {hasCommittedBid
+                        ? formatXlm(BigInt(bid.amountStroops))
+                        : bid
+                          ? 'Not committed'
+                          : '—'}
                     </dd>
                   </div>
                 </dl>
+
+                {bidStatus === 'pending' && (
+                  <p className="mt-3 font-mono text-[10px] uppercase tracking-widest text-outline">
+                    Submission is pending or interrupted. Do not retry.
+                  </p>
+                )}
+                {bidStatus === 'unknown' && (
+                  <div className="mt-3">
+                    <p className="font-mono text-[10px] uppercase tracking-widest text-error">
+                      Submission outcome is unknown. Confirm transaction status before retrying.
+                    </p>
+                    {bid?.transactionHash && (
+                      <a
+                        href={stellarTxUrl(bid.transactionHash)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-2 inline-block font-mono text-[10px] uppercase tracking-widest text-primary underline"
+                      >
+                        Check transaction status
+                      </a>
+                    )}
+                  </div>
+                )}
+                {bidStatus === 'failed' && (
+                  <p className="mt-3 font-mono text-[10px] uppercase tracking-widest text-outline">
+                    Bid was not submitted. The saved secret is safe to retry.
+                  </p>
+                )}
 
                 <div className="mt-4 flex flex-wrap gap-2">
                   {phase === 'commit' && !bid && (
@@ -719,12 +802,24 @@ export default function NamesAuctions() {
                       Place bid
                     </button>
                   )}
-                  {phase === 'commit' && bid && (
+                  {phase === 'commit' && bidStatus === 'failed' && bid && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedAuction(auction);
+                        setBidAmount(formatXlmInput(bid.amountStroops));
+                      }}
+                      className="h-9 bg-primary px-4 font-heading text-[10px] font-semibold uppercase tracking-widest text-surface"
+                    >
+                      Retry bid
+                    </button>
+                  )}
+                  {phase === 'commit' && hasCommittedBid && (
                     <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
                       Bid committed — return to reveal it
                     </span>
                   )}
-                  {phase === 'reveal' && bid && !bid.revealed && (
+                  {phase === 'reveal' && hasCommittedBid && bid && !bid.revealed && (
                     <button
                       type="button"
                       onClick={() => void revealBid(auction)}
@@ -760,16 +855,19 @@ export default function NamesAuctions() {
                       {pendingAction === `claim:${auction.name}` ? 'Claiming...' : 'Claim name'}
                     </button>
                   )}
-                  {(phase === 'ended' || phase === 'settled') && bid && !isWinner && (
-                    <button
-                      type="button"
-                      onClick={() => void refundBid(auction)}
-                      disabled={pendingAction === `refund:${auction.name}`}
-                      className="h-9 border border-primary px-4 font-heading text-[10px] font-semibold uppercase tracking-widest text-primary disabled:opacity-40"
-                    >
-                      {pendingAction === `refund:${auction.name}` ? 'Refunding...' : 'Refund bid'}
-                    </button>
-                  )}
+                  {(phase === 'ended' || phase === 'settled') &&
+                    hasCommittedBid &&
+                    bid &&
+                    !isWinner && (
+                      <button
+                        type="button"
+                        onClick={() => void refundBid(auction)}
+                        disabled={pendingAction === `refund:${auction.name}`}
+                        className="h-9 border border-primary px-4 font-heading text-[10px] font-semibold uppercase tracking-widest text-primary disabled:opacity-40"
+                      >
+                        {pendingAction === `refund:${auction.name}` ? 'Refunding...' : 'Refund bid'}
+                      </button>
+                    )}
                 </div>
               </article>
             );
@@ -822,6 +920,7 @@ export default function NamesAuctions() {
               value={bidAmount}
               onChange={(event) => setBidAmount(event.target.value)}
               placeholder="0.0"
+              disabled={retryingBid}
               aria-invalid={Boolean(bidError)}
               className="mt-2 h-12 w-full border border-outline-variant bg-surface-container px-4 font-heading text-xl text-primary"
             />
@@ -863,13 +962,16 @@ export default function NamesAuctions() {
                 parsedBid === null ||
                 Boolean(bidError) ||
                 pendingAction === `bid:${selectedAuction.name}` ||
+                selectedBidCannotRetry ||
                 !unlocked
               }
               className="mt-5 h-11 w-full bg-primary font-heading text-[11px] font-semibold uppercase tracking-widest text-surface disabled:opacity-30"
             >
               {pendingAction === `bid:${selectedAuction.name}`
                 ? 'Confirm in wallet...'
-                : 'Place bid'}
+                : retryingBid
+                  ? 'Retry bid'
+                  : 'Place bid'}
             </button>
           </div>
         </div>

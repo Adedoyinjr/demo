@@ -9,6 +9,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { Buffer } from 'buffer';
 import { STELLAR_NETWORK } from '@/config';
+import { TransactionSubmissionError } from '@/lib/stellar/auctionBidSubmission';
 
 // Override for futurenet recordings or a new deployment without rebuilding this module.
 export const NAMES_CONTRACT_ID =
@@ -528,14 +529,40 @@ export async function getOwnedNames(ownerAddress: string): Promise<string[]> {
  * Submit a signed transaction to the network
  */
 export async function submitTransaction(signedXdr: string): Promise<string> {
-  const { rpc } = await import('@stellar/stellar-sdk');
-  const server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
+  let server: InstanceType<(typeof import('@stellar/stellar-sdk'))['rpc']['Server']>;
+  let tx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  let transactionHash: string;
+  try {
+    const { rpc } = await import('@stellar/stellar-sdk');
+    server = new rpc.Server(STELLAR_NETWORK.rpcUrl);
+    tx = TransactionBuilder.fromXDR(signedXdr, STELLAR_NETWORK.networkPassphrase);
+    transactionHash = tx.hash().toString('hex');
+  } catch (error) {
+    throw new TransactionSubmissionError(
+      error instanceof Error ? error.message : 'Failed to prepare transaction submission.',
+      'rejected',
+    );
+  }
 
-  const tx = TransactionBuilder.fromXDR(signedXdr, STELLAR_NETWORK.networkPassphrase);
-  const result = await server.sendTransaction(tx);
+  let result: Awaited<ReturnType<typeof server.sendTransaction>>;
+  try {
+    result = await server.sendTransaction(tx);
+  } catch (error) {
+    throw new TransactionSubmissionError(
+      error instanceof Error ? error.message : 'Transaction submission outcome is unknown.',
+      'unknown',
+      transactionHash,
+    );
+  }
 
-  if (result.status === 'ERROR') {
-    throw new Error(result.errorResult?.toString() || 'Transaction failed');
+  if (result.status === 'ERROR' || result.status === 'TRY_AGAIN_LATER') {
+    throw new TransactionSubmissionError(
+      result.errorResult?.toString() ||
+        (result.status === 'TRY_AGAIN_LATER'
+          ? 'The network did not accept the transaction; retry is safe.'
+          : 'Transaction was rejected before broadcast.'),
+      'rejected',
+    );
   }
 
   return result.hash;

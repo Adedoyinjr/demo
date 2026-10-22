@@ -516,4 +516,36 @@ describe('saveBid read-back verification (submission gate)', () => {
     expect(decrypted.gate?.amountStroops).toBe(gateBid.amountStroops);
     expect(decrypted.gate?.revealed).toBe(false);
   });
+
+  it('persists submission status transitions with the encrypted recovery secret', async () => {
+    const { useNameWatchlistStore: StoreA } = await loadStore();
+    const storeA = StoreA.getState();
+    await storeA.setPassphrase(passphrase, iterations);
+    await storeA.saveBid({ ...gateBid, submissionStatus: 'pending' });
+    await storeA.updateBidSubmission('gate', 'committed', 'stellar-hash');
+
+    expect(StoreA.getState().getBids().gate).toMatchObject({
+      saltHex: gateBid.saltHex,
+      submissionStatus: 'committed',
+      transactionHash: 'stellar-hash',
+    });
+    const raw = localStorage.getItem('wraith-name-auction-watchlist');
+    expect(raw).not.toContain(gateBid.saltHex);
+
+    const { useNameWatchlistStore: StoreB } = await loadStore();
+    const storeB = StoreB.getState();
+    storeB.inspectStorage();
+    await storeB.unlock(passphrase);
+    expect(storeB.getBids().gate).toMatchObject({
+      saltHex: gateBid.saltHex,
+      submissionStatus: 'committed',
+      transactionHash: 'stellar-hash',
+    });
+    await storeB.updateBidSubmission('gate', 'unknown', 'possible-hash');
+    expect(storeB.getBids().gate).toMatchObject({
+      saltHex: gateBid.saltHex,
+      submissionStatus: 'unknown',
+      transactionHash: 'possible-hash',
+    });
+  });
 });
