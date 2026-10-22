@@ -106,6 +106,36 @@ describe('auction bid submission recovery', () => {
     });
   });
 
+  it('persists the transaction hash before broadcast for reload-safe reconciliation', async () => {
+    const state = setup();
+    const calls: string[] = [];
+    const submitTransaction = vi.fn(async (_xdr: string, onPrepared?: (hash: string) => Promise<void>) => {
+      calls.push('broadcast');
+      await onPrepared?.('prepared-hash');
+      return 'prepared-hash';
+    });
+    const updateBidSubmission = vi.fn(async (
+      name: string,
+      status: NonNullable<AuctionBid['submissionStatus']>,
+      transactionHash?: string,
+    ) => {
+      calls.push(`persist:${status}:${transactionHash ?? ''}`);
+      await state.updateBidSubmission(name, status, transactionHash);
+    });
+
+    const result = await submitBidWithRecovery(bid, {
+      ...state,
+      updateBidSubmission,
+      buildTransaction: vi.fn().mockResolvedValue('unsigned-xdr'),
+      signTransaction: vi.fn().mockResolvedValue('signed-xdr'),
+      submitTransaction,
+    });
+
+    expect(result.status).toBe('committed');
+    expect(calls).toEqual(['broadcast', 'persist:pending:prepared-hash']);
+    expect(updateBidSubmission).toHaveBeenCalledWith('nova', 'committed', 'prepared-hash');
+  });
+
   it('promotes a bid and records its hash only after successful submission', async () => {
     const state = setup();
 
