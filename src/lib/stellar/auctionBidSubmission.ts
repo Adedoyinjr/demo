@@ -22,7 +22,10 @@ interface SubmitBidOptions {
   ) => Promise<void>;
   buildTransaction: () => Promise<string>;
   signTransaction: (xdr: string) => Promise<string>;
-  submitTransaction: (signedXdr: string) => Promise<string>;
+  submitTransaction: (
+    signedXdr: string,
+    onPrepared?: (transactionHash: string) => Promise<void>,
+  ) => Promise<string>;
 }
 
 export type BidSubmissionResult =
@@ -47,7 +50,11 @@ export async function submitBidWithRecovery(
 
   let transactionHash: string;
   try {
-    transactionHash = await options.submitTransaction(signedXdr);
+    transactionHash = await options.submitTransaction(signedXdr, async (hash) => {
+      // Persist the deterministic hash before broadcast so a reload between
+      // submission and confirmation can still reconcile this exact transaction.
+      await options.updateBidSubmission(bid.name, 'pending', hash);
+    });
   } catch (error) {
     const status =
       error instanceof TransactionSubmissionError && error.outcome === 'rejected'
