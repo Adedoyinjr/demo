@@ -110,8 +110,8 @@ describe('auction bid submission recovery', () => {
     const state = setup();
     const calls: string[] = [];
     const submitTransaction = vi.fn(async (_xdr: string, onPrepared?: (hash: string) => Promise<void>) => {
-      calls.push('broadcast');
       await onPrepared?.('prepared-hash');
+      calls.push('broadcast');
       return 'prepared-hash';
     });
     const updateBidSubmission = vi.fn(async (
@@ -132,7 +132,7 @@ describe('auction bid submission recovery', () => {
     });
 
     expect(result.status).toBe('committed');
-    expect(calls).toEqual(['broadcast', 'persist:pending:prepared-hash']);
+    expect(calls).toEqual(['persist:pending:prepared-hash', 'broadcast']);
     expect(updateBidSubmission).toHaveBeenCalledWith('nova', 'committed', 'prepared-hash');
   });
 
