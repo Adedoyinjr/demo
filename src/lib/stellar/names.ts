@@ -709,7 +709,10 @@ export async function getOwnedNames(ownerAddress: string): Promise<string[]> {
 /**
  * Submit a signed transaction to the network
  */
-export async function submitTransaction(signedXdr: string): Promise<string> {
+export async function submitTransaction(
+  signedXdr: string,
+  onPrepared?: (transactionHash: string) => Promise<void>,
+): Promise<string> {
   let server: InstanceType<(typeof import('@stellar/stellar-sdk'))['rpc']['Server']>;
   let tx: ReturnType<typeof TransactionBuilder.fromXDR>;
   let transactionHash: string;
@@ -723,6 +726,19 @@ export async function submitTransaction(signedXdr: string): Promise<string> {
       error instanceof Error ? error.message : 'Failed to prepare transaction submission.',
       'rejected',
     );
+  }
+
+  if (onPrepared) {
+    try {
+      await onPrepared(transactionHash);
+    } catch (error) {
+      throw new TransactionSubmissionError(
+        error instanceof Error
+          ? `Could not persist transaction recovery state: ${error.message}`
+          : 'Could not persist transaction recovery state.',
+        'rejected',
+      );
+    }
   }
 
   let result: Awaited<ReturnType<typeof server.sendTransaction>>;
