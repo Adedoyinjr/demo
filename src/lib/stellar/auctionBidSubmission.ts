@@ -66,6 +66,13 @@ export async function submitBidWithRecovery(
     return { status, error, ...(transactionHash ? { transactionHash } : {}) };
   }
 
-  await options.updateBidSubmission(bid.name, 'committed', transactionHash);
-  return { status: 'committed', transactionHash };
+  // sendTransaction returning a hash only confirms that the RPC accepted the
+  // submission. Soroban execution may still be pending or may fail, so keep
+  // the persisted bid non-committed until getTransaction confirms SUCCESS.
+  await options.updateBidSubmission(bid.name, 'unknown', transactionHash);
+  return {
+    status: 'unknown',
+    transactionHash,
+    error: new Error('Transaction submitted; awaiting authoritative confirmation.'),
+  };
 }
