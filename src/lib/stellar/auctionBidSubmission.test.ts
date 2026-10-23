@@ -131,16 +131,16 @@ describe('auction bid submission recovery', () => {
       submitTransaction,
     });
 
-    expect(result.status).toBe('committed');
+    expect(result.status).toBe('unknown');
     expect(calls).toEqual([
       'persist:pending:prepared-hash',
       'broadcast',
-      'persist:committed:prepared-hash',
+      'persist:unknown:prepared-hash',
     ]);
-    expect(updateBidSubmission).toHaveBeenCalledWith('nova', 'committed', 'prepared-hash');
+    expect(updateBidSubmission).toHaveBeenCalledWith('nova', 'unknown', 'prepared-hash');
   });
 
-  it('promotes a bid and records its hash only after successful submission', async () => {
+  it('does not mark a submitted transaction committed before Soroban confirms execution', async () => {
     const state = setup();
 
     const result = await submitBidWithRecovery(bid, {
@@ -150,10 +150,11 @@ describe('auction bid submission recovery', () => {
       submitTransaction: vi.fn().mockResolvedValue('transaction-hash'),
     });
 
-    expect(result).toEqual({ status: 'committed', transactionHash: 'transaction-hash' });
+    expect(result.status).toBe('unknown');
+    expect(result.transactionHash).toBe('transaction-hash');
     expect(state.getStoredBid()).toMatchObject({
       saltHex: bid.saltHex,
-      submissionStatus: 'committed',
+      submissionStatus: 'unknown',
       transactionHash: 'transaction-hash',
     });
   });
