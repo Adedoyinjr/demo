@@ -445,7 +445,12 @@ export const useNameWatchlistStore = create<NameWatchlistState>((set, get) => ({
       throw new Error(`No recovery record exists for ${key}.`);
     }
     const updatedBid: AuctionBid = { ...bid, submissionStatus };
-    if ((submissionStatus === 'committed' || submissionStatus === 'unknown' || submissionStatus === 'pending') && transactionHash) {
+    if (
+      (submissionStatus === 'committed' ||
+        submissionStatus === 'unknown' ||
+        submissionStatus === 'pending') &&
+      transactionHash
+    ) {
       updatedBid.transactionHash = transactionHash;
     } else {
       delete updatedBid.transactionHash;

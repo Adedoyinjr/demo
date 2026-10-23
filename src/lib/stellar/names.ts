@@ -779,4 +779,3 @@ export async function getNameBidTransactionStatus(
   if (result.status === 'FAILED') return 'FAILED';
   return 'NOT_FOUND';
 }
-
