@@ -109,19 +109,23 @@ describe('auction bid submission recovery', () => {
   it('persists the transaction hash before broadcast for reload-safe reconciliation', async () => {
     const state = setup();
     const calls: string[] = [];
-    const submitTransaction = vi.fn(async (_xdr: string, onPrepared?: (hash: string) => Promise<void>) => {
-      await onPrepared?.('prepared-hash');
-      calls.push('broadcast');
-      return 'prepared-hash';
-    });
-    const updateBidSubmission = vi.fn(async (
-      name: string,
-      status: NonNullable<AuctionBid['submissionStatus']>,
-      transactionHash?: string,
-    ) => {
-      calls.push(`persist:${status}:${transactionHash ?? ''}`);
-      await state.updateBidSubmission(name, status, transactionHash);
-    });
+    const submitTransaction = vi.fn(
+      async (_xdr: string, onPrepared?: (hash: string) => Promise<void>) => {
+        await onPrepared?.('prepared-hash');
+        calls.push('broadcast');
+        return 'prepared-hash';
+      },
+    );
+    const updateBidSubmission = vi.fn(
+      async (
+        name: string,
+        status: NonNullable<AuctionBid['submissionStatus']>,
+        transactionHash?: string,
+      ) => {
+        calls.push(`persist:${status}:${transactionHash ?? ''}`);
+        await state.updateBidSubmission(name, status, transactionHash);
+      },
+    );
 
     const result = await submitBidWithRecovery(bid, {
       ...state,

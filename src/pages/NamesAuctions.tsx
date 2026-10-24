@@ -157,9 +157,13 @@ export default function NamesAuctions() {
     let active = true;
     const reconcile = async () => {
       try {
-        await reconcileUnknownBids(bids, getNameBidTransactionStatus, async (name, nextStatus, hash) => {
-          if (active) await updateBidSubmission(name, nextStatus, hash);
-        });
+        await reconcileUnknownBids(
+          bids,
+          getNameBidTransactionStatus,
+          async (name, nextStatus, hash) => {
+            if (active) await updateBidSubmission(name, nextStatus, hash);
+          },
+        );
       } catch {
         // Keep unknown/pending state on RPC or persistence errors; the next
         // interval retries without enabling reveal, refund, or another bid.

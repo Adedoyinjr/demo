@@ -68,7 +68,12 @@ describe('auction bid transaction reconciliation', () => {
       {
         committed: { ...bid, name: 'committed', submissionStatus: 'committed' },
         failed: { ...bid, name: 'failed', submissionStatus: 'failed' },
-        pending: { ...bid, name: 'pending', submissionStatus: 'pending', transactionHash: undefined },
+        pending: {
+          ...bid,
+          name: 'pending',
+          submissionStatus: 'pending',
+          transactionHash: undefined,
+        },
       },
       lookup,
       update,
